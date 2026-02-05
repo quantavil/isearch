@@ -1,0 +1,27 @@
+{
+    "name": "ask-google",
+    "version": "1.0.0",
+    "description": "Fast Google Search CLI with anti-bot detection using persistent browser profiles",
+    "main": "index.js",
+    "bin": {
+        "ask": "./index.js"
+    },
+    "scripts": {
+        "setup": "node setup.js",
+        "start": "node index.js"
+    },
+    "keywords": [
+        "google",
+        "search",
+        "cli",
+        "scraper"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "cheerio": "latest",
+        "playwright": "latest",
+        "turndown": "^7.2.2",
+        "turndown-plugin-gfm": "^1.0.2"
+    }
+}
