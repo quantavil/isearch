@@ -13,7 +13,7 @@ const os = require('os');
 // CONFIG
 // ═══════════════════════════════════════════════════════════════
 
-const IDLE_TIMEOUT = 120_000;        // Close browser after 120s idle
+const IDLE_TIMEOUT = 180_000;        // Close browser after 180s idle
 const CACHE_TTL = 300_000;           // Cache results for 5 minutes
 const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
 const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
@@ -60,7 +60,7 @@ function getCached(query) {
 function setCache(query, markdown) {
   const key = query.toLowerCase().trim();
   cache.set(key, { markdown, time: Date.now() });
-  
+
   // Limit cache size
   if (cache.size > 100) {
     const firstKey = cache.keys().next().value;
@@ -91,7 +91,7 @@ async function initBrowser() {
 
   // Close existing if any
   if (context) {
-    await context.close().catch(() => {});
+    await context.close().catch(() => { });
   }
 
   const options = {
@@ -140,17 +140,17 @@ async function initBrowser() {
 
     // Allow only essential
     if (type === 'document') return route.continue();
-    
+
     // Allow Google's core scripts only
     if (type === 'script') {
-      if (url.includes('google.com/xjs') || 
-          url.includes('google.com/js') ||
-          url.includes('gstatic.com/og')) {
+      if (url.includes('google.com/xjs') ||
+        url.includes('google.com/js') ||
+        url.includes('gstatic.com/og')) {
         return route.continue();
       }
       return route.abort();
     }
-    
+
     // Allow XHR/Fetch for AI responses
     if (type === 'xhr' || type === 'fetch') {
       if (url.includes('google.com')) {
@@ -166,7 +166,7 @@ async function initBrowser() {
   await page.goto('https://www.google.com/search?udm=50&q=test', {
     waitUntil: 'domcontentloaded',
     timeout: 10000
-  }).catch(() => {});
+  }).catch(() => { });
 
   pageReady = true;
   log('Page ready');
@@ -178,7 +178,7 @@ async function closeBrowser() {
   pageReady = false;
   page = null;
   if (context) {
-    await context.close().catch(() => {});
+    await context.close().catch(() => { });
     context = null;
     log('Browser closed');
   }
@@ -190,7 +190,7 @@ async function closeBrowser() {
 
 async function search(query) {
   const t0 = Date.now();
-  
+
   // Check cache first
   const cached = getCached(query);
   if (cached !== null) {
@@ -198,7 +198,7 @@ async function search(query) {
   }
 
   const pg = await initBrowser();
-  
+
   const t1 = Date.now();
   log(`Browser ready: ${t1 - t0}ms`);
 
@@ -216,15 +216,15 @@ async function search(query) {
     await pg.waitForFunction(() => {
       const main = document.querySelector('[data-container-id="main-col"]');
       if (!main) return false;
-      
+
       const text = main.innerText || '';
-      
+
       // Quick answers (like 1+1) have short text but complete fast
       // Complex answers have longer text
       // Either way, check if "Thinking" is gone
       const thinking = document.querySelector('.NuOswe, .LoBHAe, .J945jc');
       const feedback = document.querySelector('[aria-label="Helpful"]');
-      
+
       // Done if: has content AND (no thinking OR has feedback)
       return text.length > 10 && (!thinking || feedback);
     }, { timeout: 6000, polling: 50 });  // Faster polling
@@ -244,7 +244,7 @@ async function search(query) {
   }
 
   const markdown = parseToMarkdown(html);
-  
+
   // Cache result
   if (markdown) {
     setCache(query, markdown);
@@ -277,7 +277,7 @@ function parseToMarkdown(html) {
     '[aria-hidden="true"]',
     '[style*="display:none"]',
     '.NuOswe', '.LoBHAe', '.J945jc',
-    '.AGtNEf', '.VKalRc', '.xXnAhe'  // More UI elements
+    '.AGtNEf', '.VKalRc', '.xXnAhe'
   ].join(', ')).remove();
 
   $clone.find('a').removeAttr('href');
@@ -300,6 +300,18 @@ function parseToMarkdown(html) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════
+
+module.exports = {
+  search,
+  initBrowser,
+  closeBrowser,
+  shutdown,
+  handleQuery
+};
+
+// ═══════════════════════════════════════════════════════════════
 // SERVER
 // ═══════════════════════════════════════════════════════════════
 
@@ -316,7 +328,7 @@ async function handleQuery(queryText) {
   }
 
   if (queryText === '__STATUS__') {
-    return { 
+    return {
       browserReady: pageReady,
       cacheSize: cache.size,
       uptime: process.uptime()
@@ -334,7 +346,7 @@ async function handleQuery(queryText) {
 }
 
 function startServer() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
 
   const server = net.createServer(socket => {
     let buffer = '';
@@ -357,13 +369,13 @@ function startServer() {
       }
     });
 
-    socket.on('error', () => {});
+    socket.on('error', () => { });
   });
 
   server.listen(SOCKET_PATH, () => {
     log(`Listening on ${SOCKET_PATH}`);
     resetIdleTimer();
-    
+
     // Pre-warm browser on startup
     initBrowser().catch(err => log(`Pre-warm failed: ${err.message}`));
   });
@@ -384,7 +396,7 @@ async function shutdown() {
   await closeBrowser();
   if (server) {
     server.close();
-    try { fs.unlinkSync(SOCKET_PATH); } catch {}
+    try { fs.unlinkSync(SOCKET_PATH); } catch { }
   }
   process.exit(0);
 }
@@ -392,4 +404,6 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-server = startServer();
+if (require.main === module) {
+  server = startServer();
+}

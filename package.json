@@ -8,7 +8,8 @@
     },
     "scripts": {
         "setup": "node setup.js",
-        "start": "node index.js"
+        "start": "node index.js",
+        "mcp": "node mcp-server.js"
     },
     "keywords": [
         "google",
@@ -19,6 +20,7 @@
     "author": "",
     "license": "MIT",
     "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.26.0",
         "cheerio": "latest",
         "playwright": "latest",
         "turndown": "^7.2.2",
