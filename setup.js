@@ -12,15 +12,15 @@ async function setup() {
 
   console.log('\n🔐 Google Search CLI Setup\n');
   console.log('1. Browser will open');
-  console.log('2. Login to Google');
-  console.log('3. Do a test search to build cookies');
+  console.log('2. Login to Google (if needed)');
+  console.log('3. Do a test search');
   console.log('4. Close browser when done\n');
 
   let context;
 
   try {
     const options = {
-      headless: false,
+      headless: false,  // Must be visible for setup
       args: [
         '--disable-blink-features=AutomationControlled',
         '--no-first-run',
@@ -31,7 +31,6 @@ async function setup() {
       viewport: { width: 1280, height: 800 }
     };
 
-    // Try Chrome first
     try {
       context = await chromium.launchPersistentContext(PROFILE_PATH, {
         ...options,
@@ -44,19 +43,11 @@ async function setup() {
     }
 
     const page = await context.newPage();
-
-    // Go to Google search directly
     await page.goto('https://www.google.com/search?q=test&udm=50');
 
     console.log('⏳ Waiting for you to complete...\n');
 
-    // Wait for close (max 5 min)
-    await Promise.race([
-      new Promise(resolve => context.on('close', resolve)),
-      new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000))
-    ]);
-
-    try { await context.close(); } catch {}
+    await new Promise(resolve => context.on('close', resolve));
 
     console.log('✅ Profile saved!\n');
     console.log('Now run: ask <query>\n');

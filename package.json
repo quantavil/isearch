@@ -4,7 +4,7 @@
     "description": "Fast Google Search CLI with anti-bot detection using persistent browser profiles",
     "main": "index.js",
     "bin": {
-        "ask": "./index.js"
+        "ask": "./ask.js"
     },
     "scripts": {
         "setup": "node setup.js",
