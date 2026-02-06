@@ -19,10 +19,31 @@ const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
 const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
 const DEBUG = process.env.DEBUG === '1';
 
+// CAPTCHA Settings
+const CAPTCHA_MAX_CONSECUTIVE = 3;   // Restart browser after 3 CAPTCHAs
+const CAPTCHA_COOLDOWN_MS = 30_000;  // 30s cooldown after restart
+const CAPTCHA_WAIT_TIMEOUT = 120_000; // 2 minutes to solve CAPTCHA
+
+// Completion Detection Timeouts (optimized for speed)
+const SVG_DETECTION_TIMEOUT = 10_000;   // 10s for SVG thumbs-up
+const ARIA_DETECTION_TIMEOUT = 6_000;   // 6s for aria-label
+const TEXT_DETECTION_TIMEOUT = 8_000;   // 8s for text polling
+const OVERALL_TIMEOUT = 25_000;         // 25s overall timeout
+
+// CAPTCHA Detection Indicators
+const CAPTCHA_INDICATORS = [
+  'unusual traffic',
+  'are you a robot',
+  'captcha',
+  'verify you\'re human',
+  'recaptcha'
+];
+
 const STEALTH = `
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
   window.chrome = { runtime: {}, app: {} };
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 `;
 
 // ═══════════════════════════════════════════════════════════════
@@ -60,42 +81,50 @@ function getCached(query) {
 function setCache(query, markdown) {
   const key = query.toLowerCase().trim();
   cache.set(key, { markdown, time: Date.now() });
-
-  // Limit cache size
   if (cache.size > 100) {
-    const firstKey = cache.keys().next().value;
-    cache.delete(firstKey);
+    cache.delete(cache.keys().next().value);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BROWSER POOL - Single persistent page
+// BROWSER POOL
 // ═══════════════════════════════════════════════════════════════
 
 let context = null;
 let page = null;
 let pageReady = false;
 let idleTimer = null;
+let currentHeadless = true;
+let consecutiveCaptchas = 0;
 
 function resetIdleTimer() {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(shutdown, IDLE_TIMEOUT);
 }
 
-async function initBrowser() {
+async function initBrowser(headless = null) {
+  const shouldBeHeadless = headless !== null ? headless : !DEBUG;
+
+  // Recreate browser if headless mode changed
+  if (context && currentHeadless !== shouldBeHeadless) {
+    log(`Switching: ${currentHeadless ? 'headless' : 'visible'} → ${shouldBeHeadless ? 'headless' : 'visible'}`);
+    await closeBrowser();
+  }
+
   if (context && page && pageReady) return page;
 
   if (!fs.existsSync(PROFILE_PATH)) {
     throw new Error('Profile not found. Run: npm run setup');
   }
 
-  // Close existing if any
   if (context) {
     await context.close().catch(() => { });
   }
 
+  currentHeadless = shouldBeHeadless;
+
   const options = {
-    headless: !DEBUG,
+    headless: shouldBeHeadless,
     args: [
       '--disable-blink-features=AutomationControlled',
       '--disable-dev-shm-usage',
@@ -103,20 +132,19 @@ async function initBrowser() {
       '--disable-gpu',
       '--disable-extensions',
       '--disable-background-networking',
-      '--disable-default-apps',
       '--disable-sync',
       '--disable-translate',
       '--no-first-run',
-      '--disable-hang-monitor',
       '--disable-popup-blocking',
-      '--disable-prompt-on-repost',
-      '--disable-renderer-backgrounding',
-      '--disable-component-update',
+      '--disable-infobars',
+      '--disable-notifications',
+      '--lang=en-US',
       '--window-size=1280,800'
     ],
     ignoreDefaultArgs: ['--enable-automation'],
     viewport: { width: 1280, height: 800 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'en-US'
   };
 
   try {
@@ -125,52 +153,34 @@ async function initBrowser() {
     context = await chromium.launchPersistentContext(PROFILE_PATH, options);
   }
 
-  log('Browser started');
+  log(`Browser started (${shouldBeHeadless ? 'headless' : 'visible'})`);
 
-  // Get or create single page
   page = context.pages()[0] || await context.newPage();
-
-  // Setup once
   await page.addInitScript(STEALTH);
 
-  // Aggressive resource blocking
+  // Resource blocking for speed
   await page.route('**/*', route => {
     const type = route.request().resourceType();
     const url = route.request().url();
 
-    // Allow only essential
     if (type === 'document') return route.continue();
-
-    // Allow Google's core scripts only
-    if (type === 'script') {
-      if (url.includes('google.com/xjs') ||
-        url.includes('google.com/js') ||
-        url.includes('gstatic.com/og')) {
-        return route.continue();
-      }
-      return route.abort();
+    if (type === 'script' && (url.includes('google.com/xjs') || url.includes('google.com/js') || url.includes('gstatic.com'))) {
+      return route.continue();
     }
-
-    // Allow XHR/Fetch for AI responses
-    if (type === 'xhr' || type === 'fetch') {
-      if (url.includes('google.com')) {
-        return route.continue();
-      }
+    if ((type === 'xhr' || type === 'fetch') && url.includes('google.com')) {
+      return route.continue();
     }
-
-    // Block everything else: images, css, fonts, media, etc.
     return route.abort();
   });
 
-  // Pre-warm: navigate to Google
-  await page.goto('https://www.google.com/search?udm=50&q=test', {
+  // Pre-warm: load Google homepage only
+  await page.goto('https://www.google.com/?udm=50', {
     waitUntil: 'domcontentloaded',
     timeout: 10000
   }).catch(() => { });
 
   pageReady = true;
   log('Page ready');
-
   return page;
 }
 
@@ -184,74 +194,181 @@ async function closeBrowser() {
   }
 }
 
+async function restartBrowser(reason) {
+  log(`Restarting browser: ${reason}`);
+  await closeBrowser();
+  log(`Cooldown: ${CAPTCHA_COOLDOWN_MS / 1000}s...`);
+  await sleep(CAPTCHA_COOLDOWN_MS);
+  consecutiveCaptchas = 0;
+  await initBrowser(true);
+}
+
 // ═══════════════════════════════════════════════════════════════
-// SEARCH - Ultra fast
+// PARALLEL COMPLETION DETECTION (Promise.race)
+// ═══════════════════════════════════════════════════════════════
+
+// SVG selectors for feedback buttons (Helpful, Not helpful, Share - all use viewBox 3 3 18 18)
+const SVG_SELECTORS = [
+  'button svg[viewBox="3 3 18 18"]',              // Generic: any button with this viewBox
+  'button span svg[viewBox="3 3 18 18"]',         // Share button pattern
+  '[aria-label="Helpful"] svg',                   // Helpful button SVG
+  '[aria-label="Not helpful"] svg',               // Not helpful button SVG
+  '[aria-label=" Share"] svg',                    // Share button SVG (with leading space)
+  '[aria-label="Share"] svg'                      // Share button SVG (without space)
+].join(', ');
+
+// Aria-label selectors (multi-language: helpful, not helpful, share)
+const ARIA_SELECTORS = [
+  // English (note: Share has leading space in actual HTML)
+  '[aria-label="Helpful"]', '[aria-label="Not helpful"]', '[aria-label=" Share"]', '[aria-label="Share"]',
+  // German
+  '[aria-label="Hilfreich"]', '[aria-label="Nicht hilfreich"]', '[aria-label="Teilen"]',
+  // French
+  '[aria-label="Utile"]', '[aria-label="Pas utile"]', '[aria-label="Partager"]',
+  // Spanish
+  '[aria-label="Útil"]', '[aria-label="No es útil"]', '[aria-label="Compartir"]'
+].join(', ');
+
+async function waitForAiCompletion(pg) {
+  const startTime = Date.now();
+  log('Waiting for AI completion...');
+
+  // Method 1: SVG icons (most reliable, language-independent)
+  const svgPromise = pg.waitForSelector(SVG_SELECTORS, {
+    timeout: OVERALL_TIMEOUT,
+    state: 'visible'
+  }).then(() => ({ method: 'svg', elapsed: Date.now() - startTime }));
+
+  // Method 2: aria-label buttons (multi-language)
+  const ariaPromise = pg.waitForSelector(ARIA_SELECTORS, {
+    timeout: OVERALL_TIMEOUT,
+    state: 'visible'
+  }).then(() => ({ method: 'aria', elapsed: Date.now() - startTime }));
+
+  // Method 3: Timeout fallback
+  const timeoutPromise = sleep(OVERALL_TIMEOUT).then(() => ({ method: 'timeout', elapsed: OVERALL_TIMEOUT }));
+
+  // Race - first to resolve wins
+  try {
+    const winner = await Promise.race([
+      svgPromise.catch(() => new Promise(() => { })),
+      ariaPromise.catch(() => new Promise(() => { })),
+      timeoutPromise
+    ]);
+    log(`✓ ${winner.method} detected (${winner.elapsed}ms)`);
+    return winner;
+  } catch {
+    return { method: 'timeout', elapsed: Date.now() - startTime };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CAPTCHA HANDLING
+// ═══════════════════════════════════════════════════════════════
+
+function detectCaptcha(html) {
+  const lower = html.toLowerCase();
+  return CAPTCHA_INDICATORS.some(ind => lower.includes(ind));
+}
+
+async function handleCaptcha(query) {
+  consecutiveCaptchas++;
+  log(`CAPTCHA detected! (${consecutiveCaptchas}/${CAPTCHA_MAX_CONSECUTIVE})`);
+
+  if (consecutiveCaptchas >= CAPTCHA_MAX_CONSECUTIVE) {
+    await restartBrowser('max CAPTCHAs');
+    return { success: false, error: 'Too many CAPTCHAs - browser restarted. Please retry.', captchaRequired: true };
+  }
+
+  // Switch to visible mode
+  await closeBrowser();
+  const pg = await initBrowser(false);
+
+  try {
+    await pg.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 15000
+    });
+  } catch (err) {
+    return { success: false, error: `Navigation failed: ${err.message}`, captchaRequired: true };
+  }
+
+  log(`Waiting for CAPTCHA solution (${CAPTCHA_WAIT_TIMEOUT / 1000}s timeout)...`);
+  const captchaDeadline = Date.now() + CAPTCHA_WAIT_TIMEOUT;
+
+  while (Date.now() < captchaDeadline) {
+    await sleep(2000);
+
+    try {
+      const html = await pg.content();
+      if (!detectCaptcha(html)) {
+        log('CAPTCHA solved!');
+        await waitForAiCompletion(pg);
+
+        const finalHtml = await pg.content();
+        const markdown = parseToMarkdown(finalHtml);
+        consecutiveCaptchas = 0;
+
+        // Switch back to headless
+        await closeBrowser();
+        await initBrowser(true);
+
+        return { success: true, markdown, fromCache: false };
+      }
+    } catch { }
+
+    log('Waiting for CAPTCHA...');
+  }
+
+  return { success: false, error: 'CAPTCHA timeout', captchaRequired: true };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SEARCH
 // ═══════════════════════════════════════════════════════════════
 
 async function search(query) {
   const t0 = Date.now();
 
-  // Check cache first
   const cached = getCached(query);
-  if (cached !== null) {
-    return { markdown: cached, fromCache: true };
-  }
+  if (cached) return { markdown: cached, fromCache: true };
 
   const pg = await initBrowser();
+  log(`Browser ready: ${Date.now() - t0}ms`);
 
   const t1 = Date.now();
-  log(`Browser ready: ${t1 - t0}ms`);
-
-  // Navigate (reusing same page)
   await pg.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
     waitUntil: 'domcontentloaded',
     timeout: 10000
   });
+  log(`Navigation: ${Date.now() - t1}ms`);
 
-  const t2 = Date.now();
-  log(`Navigation: ${t2 - t1}ms`);
-
-  // Fast wait - progressive checking
-  try {
-    await pg.waitForFunction(() => {
-      const main = document.querySelector('[data-container-id="main-col"]');
-      if (!main) return false;
-
-      const text = main.innerText || '';
-
-      // Quick answers (like 1+1) have short text but complete fast
-      // Complex answers have longer text
-      // Either way, check if "Thinking" is gone
-      const thinking = document.querySelector('.NuOswe, .LoBHAe, .J945jc');
-      const feedback = document.querySelector('[aria-label="Helpful"]');
-
-      // Done if: has content AND (no thinking OR has feedback)
-      return text.length > 10 && (!thinking || feedback);
-    }, { timeout: 6000, polling: 50 });  // Faster polling
-  } catch {
-    log('Wait timeout - using partial content');
-  }
-
-  const t3 = Date.now();
-  log(`Content wait: ${t3 - t2}ms`);
-
+  // Quick CAPTCHA check
   const html = await pg.content();
-
-  if (DEBUG) fs.writeFileSync('debug.html', html);
-
-  if (html.includes('unusual traffic')) {
-    throw new Error('CAPTCHA detected! Run: npm run setup');
+  if (detectCaptcha(html)) {
+    return handleCaptcha(query);
   }
 
-  const markdown = parseToMarkdown(html);
+  // Wait for AI completion
+  const t2 = Date.now();
+  const completion = await waitForAiCompletion(pg);
+  log(`Wait (${completion.method}): ${Date.now() - t2}ms`);
 
-  // Cache result
-  if (markdown) {
-    setCache(query, markdown);
+  // Get final content
+  const finalHtml = await pg.content();
+  if (DEBUG) fs.writeFileSync('debug.html', finalHtml);
+
+  // Double-check CAPTCHA
+  if (detectCaptcha(finalHtml)) {
+    return handleCaptcha(query);
   }
+
+  const markdown = parseToMarkdown(finalHtml);
+  consecutiveCaptchas = 0;
+
+  if (markdown) setCache(query, markdown);
 
   log(`Total: ${Date.now() - t0}ms`);
-
   return { markdown, fromCache: false };
 }
 
@@ -262,84 +379,57 @@ async function search(query) {
 function parseToMarkdown(html) {
   const $ = cheerio.load(html);
   const $container = $('[data-container-id="main-col"]').first();
-
   if (!$container.length) return null;
 
   const $clone = $container.clone();
 
   $clone.find([
-    'script', 'style', 'noscript', 'svg', 'button',
-    '[role="button"]',
+    'script', 'style', 'noscript', 'svg', 'button', 'input', 'textarea',
+    '[role="button"]', '[role="navigation"]',
     '.notranslate', '.txxDge', '.uJ19be', '.rBl3me',
     '[aria-label="Helpful"]', '[aria-label="Not helpful"]',
-    '.DBd2Wb', '.ya9Iof', '.v4bSkd',
-    '[data-crb-el]', '.Fsg96', '.Jd31eb',
-    '[aria-hidden="true"]',
-    '[style*="display:none"]',
-    '.NuOswe', '.LoBHAe', '.J945jc',
-    '.AGtNEf', '.VKalRc', '.xXnAhe'
+    '[aria-label="Hilfreich"]', '[aria-label="Nicht hilfreich"]',
+    '.DBd2Wb', '.ya9Iof', '.v4bSkd', '[data-crb-el]', '.Fsg96', '.Jd31eb',
+    '[aria-hidden="true"]', '[style*="display:none"]',
+    '.NuOswe', '.LoBHAe', '.J945jc', '.AGtNEf', '.VKalRc', '.xXnAhe',
+    '[data-ved]'
   ].join(', ')).remove();
 
   $clone.find('a').removeAttr('href');
 
-  let cleanHtml = $clone.html();
+  const cleanHtml = $clone.html();
   if (!cleanHtml) return null;
 
-  let markdown = turndown.turndown(cleanHtml);
-
-  markdown = markdown
+  return turndown.turndown(cleanHtml)
     .replace(/https?:\/\/[^\s)>\]]+/g, '')
-    .replace(/\[([^\]]+)\]\(\s*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/Thinking\s*/gi, '')
+    .replace(/Generating\s*/gi, '')
     .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  return markdown || null;
+    .trim() || null;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// EXPORTS
+// UTILITIES & SERVER
 // ═══════════════════════════════════════════════════════════════
 
-module.exports = {
-  search,
-  initBrowser,
-  closeBrowser,
-  shutdown,
-  handleQuery
-};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const log = msg => DEBUG && console.log(`[${Date.now() % 100000}] ${msg}`);
 
-// ═══════════════════════════════════════════════════════════════
-// SERVER
-// ═══════════════════════════════════════════════════════════════
-
-function log(msg) {
-  if (DEBUG) console.log(`[${Date.now() % 100000}] ${msg}`);
-}
+module.exports = { search, initBrowser, closeBrowser, shutdown, handleQuery };
 
 async function handleQuery(queryText) {
   resetIdleTimer();
 
-  if (queryText === '__STOP__') {
-    shutdown();
-    return { stopped: true };
-  }
-
+  if (queryText === '__STOP__') { shutdown(); return { stopped: true }; }
   if (queryText === '__STATUS__') {
-    return {
-      browserReady: pageReady,
-      cacheSize: cache.size,
-      uptime: process.uptime()
-    };
+    return { browserReady: pageReady, browserMode: currentHeadless ? 'headless' : 'visible', consecutiveCaptchas, cacheSize: cache.size, uptime: process.uptime() };
   }
 
   try {
-    const { markdown, fromCache } = await search(queryText);
-    return { markdown, fromCache };
+    return await search(queryText);
   } catch (err) {
-    // On error, reset browser for next query
     pageReady = false;
     return { error: err.message };
   }
@@ -348,44 +438,32 @@ async function handleQuery(queryText) {
 function startServer() {
   try { fs.unlinkSync(SOCKET_PATH); } catch { }
 
-  const server = net.createServer(socket => {
+  const srv = net.createServer(socket => {
     let buffer = '';
-
     socket.on('data', async chunk => {
       buffer += chunk.toString();
-
       if (buffer.includes('\n')) {
         const line = buffer.split('\n')[0];
         buffer = '';
-
         try {
           const { query } = JSON.parse(line);
           log(`Query: ${query}`);
-          const result = await handleQuery(query);
-          socket.end(JSON.stringify(result));
+          socket.end(JSON.stringify(await handleQuery(query)));
         } catch (err) {
           socket.end(JSON.stringify({ error: err.message }));
         }
       }
     });
-
     socket.on('error', () => { });
   });
 
-  server.listen(SOCKET_PATH, () => {
+  srv.listen(SOCKET_PATH, () => {
     log(`Listening on ${SOCKET_PATH}`);
     resetIdleTimer();
-
-    // Pre-warm browser on startup
     initBrowser().catch(err => log(`Pre-warm failed: ${err.message}`));
   });
-
-  server.on('error', err => {
-    console.error('Server error:', err);
-    process.exit(1);
-  });
-
-  return server;
+  srv.on('error', err => { console.error('Server error:', err); process.exit(1); });
+  return srv;
 }
 
 let server = null;
@@ -394,16 +472,11 @@ async function shutdown() {
   log('Shutting down...');
   if (idleTimer) clearTimeout(idleTimer);
   await closeBrowser();
-  if (server) {
-    server.close();
-    try { fs.unlinkSync(SOCKET_PATH); } catch { }
-  }
+  if (server) { server.close(); try { fs.unlinkSync(SOCKET_PATH); } catch { } }
   process.exit(0);
 }
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-if (require.main === module) {
-  server = startServer();
-}
+if (require.main === module) { server = startServer(); }

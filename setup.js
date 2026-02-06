@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+
 
 const { chromium } = require('playwright');
 const path = require('path');
