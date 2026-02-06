@@ -2,23 +2,18 @@
 
 const { chromium } = require('playwright');
 const net = require('net');
-const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { parseHtml } = require('./lib/parser');
+const {
+  SOCKET_PATH,
+  PROFILE_PATH,
+  IDLE_TIMEOUT,
+  NAV_TIMEOUT,
+  AI_WAIT_TIMEOUT,
+  CACHE_MAX
+} = require('./lib/constants');
 
-// ═══════════════════════════════════════════════════════════════
-// CONFIGURATION
-// ═══════════════════════════════════════════════════════════════
-
-const IDLE_TIMEOUT = 300_000;
-const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
-const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
 const DEBUG = process.env.DEBUG === '1';
-
-const NAV_TIMEOUT = 15000;
-const AI_WAIT_TIMEOUT = 10000;
-const CACHE_MAX = 50;
 
 
 
@@ -154,10 +149,18 @@ async function search(query) {
       throw new Error("CAPTCHA detected. Run 'npm run setup' to solve.");
     }
 
-    // Wait for AI (fast heuristic)
+    // Wait for AI completion (race multiple signals for speed)
     try {
-      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 5000 });
-      await page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT });
+      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 3000 });
+
+      // Race: either AI complete indicator OR timeout
+      await Promise.race([
+        page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT }),
+        page.waitForFunction(() => {
+          const el = document.querySelector('[data-container-id="main-col"]');
+          return el && el.textContent.length > 500;
+        }, { timeout: AI_WAIT_TIMEOUT })
+      ]);
     } catch {
       log('AI wait timeout (using available content)');
     }
@@ -172,8 +175,9 @@ async function search(query) {
 
     // Cache (LRU)
     cache.set(cacheKey, markdown);
-    while (cache.size > CACHE_MAX) {
-      cache.delete(cache.keys().next().value);
+    if (cache.size > CACHE_MAX) {
+      const firstKey = cache.keys().next().value;
+      cache.delete(firstKey);
     }
 
     const timeMs = Date.now() - t0;
@@ -188,8 +192,6 @@ async function search(query) {
     if (page) await page.close().catch(() => { });
   }
 }
-
-
 
 // ═══════════════════════════════════════════════════════════════
 // REQUEST HANDLER

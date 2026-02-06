@@ -37,7 +37,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   try {
     const r = await search(q);
-    
+
     if (r.error) {
       return { content: [{ type: "text", text: `Error: ${r.error}` }], isError: true };
     }
@@ -53,10 +53,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-new StdioServerTransport().then(t => server.connect(t)).catch(() => {
-  const t = new StdioServerTransport();
-  server.connect(t);
-}).catch(e => {
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch(e => {
   console.error('MCP error:', e);
   process.exit(1);
 });

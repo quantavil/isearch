@@ -1,26 +1,19 @@
 #!/usr/bin/env node
 
 const { chromium } = require('playwright');
-const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
+const { PROFILE_PATH } = require('./lib/constants');
+const { stop } = require('./lib/client');
 
-const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
-const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
-
-function stopDaemon() {
-  return new Promise(resolve => {
-    const client = net.createConnection(SOCKET_PATH);
-    client.on('connect', () => {
-      console.log('⚠️  Stopping running daemon...');
-      client.write(JSON.stringify({ query: '__STOP__' }) + '\n');
-      client.end();
-      setTimeout(resolve, 1000);
-    });
-    client.on('error', () => resolve());
-  });
+async function stopDaemon() {
+  try {
+    console.log('⚠️  Stopping running daemon...');
+    await stop();
+  } catch {
+    // Daemon not running, ignore
+  }
 }
+
 
 async function setup() {
   console.log('\n🔧 \x1b[1mGoogle Search CLI Setup\x1b[0m\n');
