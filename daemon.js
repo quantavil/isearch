@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 
 const { chromium } = require('playwright');
-const cheerio = require('cheerio');
-const TurndownService = require('turndown');
-const turndownPluginGfm = require('turndown-plugin-gfm');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { parseHtml } = require('./lib/parser');
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -22,27 +20,7 @@ const NAV_TIMEOUT = 15000;
 const AI_WAIT_TIMEOUT = 10000;
 const CACHE_MAX = 50;
 
-// ═══════════════════════════════════════════════════════════════
-// TURNDOWN
-// ═══════════════════════════════════════════════════════════════
 
-const turndown = new TurndownService({
-  headingStyle: 'atx',
-  bulletListMarker: '-',
-  codeBlockStyle: 'fenced',
-  hr: '---'
-});
-
-turndown.use(turndownPluginGfm.gfm);
-turndown.addRule('stripLinks', { filter: 'a', replacement: c => c });
-turndown.addRule('removeMedia', { 
-  filter: ['img', 'svg', 'canvas', 'video', 'audio'], 
-  replacement: () => '' 
-});
-turndown.addRule('removeInteractive', { 
-  filter: ['button', 'input', 'form', 'nav', 'footer', 'header'], 
-  replacement: () => '' 
-});
 
 // ═══════════════════════════════════════════════════════════════
 // STATE
@@ -207,42 +185,11 @@ async function search(query) {
     log(`Error: ${err.message}`);
     return { error: err.message, timeMs: Date.now() - t0 };
   } finally {
-    if (page) await page.close().catch(() => {});
+    if (page) await page.close().catch(() => { });
   }
 }
 
-function parseHtml(html) {
-  const $ = cheerio.load(html);
-  const $c = $('[data-container-id="main-col"]').first();
 
-  if (!$c.length) return null;
-
-  // Cleanup
-  $c.find('script, style, noscript, iframe').remove();
-  $c.find('[data-ved]').remove();
-  $c.find('[aria-label="Helpful"], [aria-label="Not helpful"], [aria-label*="Share"], [aria-label="More"]').remove();
-  $c.find('h1, h2, h3').each((_, el) => {
-    const txt = $(el).text().trim();
-    if (txt === 'Generative AI is experimental.' || txt === 'About this result') {
-      $(el).remove();
-    }
-  });
-
-  const cleanHtml = $c.html();
-  if (!cleanHtml) return null;
-
-  let md = turndown.turndown(cleanHtml);
-
-  // Minimal cleanup
-  md = md
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')  // Strip link syntax
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/Thinking\.\.\./g, '')
-    .replace(/Generating\.\.\./g, '')
-    .trim();
-
-  return md;
-}
 
 // ═══════════════════════════════════════════════════════════════
 // REQUEST HANDLER
@@ -279,7 +226,7 @@ async function handleRequest(data) {
 // ═══════════════════════════════════════════════════════════════
 
 function startServer() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
 
   server = net.createServer(socket => {
     let buffer = '';
@@ -302,7 +249,7 @@ function startServer() {
       socket.end();
     });
 
-    socket.on('error', () => {});
+    socket.on('error', () => { });
   });
 
   server.listen(SOCKET_PATH, () => {
@@ -320,9 +267,9 @@ function startServer() {
 async function shutdown() {
   log('Shutting down...');
   if (idleTimer) clearTimeout(idleTimer);
-  if (browserContext) await browserContext.close().catch(() => {});
+  if (browserContext) await browserContext.close().catch(() => { });
   if (server) server.close();
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
   process.exit(0);
 }
 
