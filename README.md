@@ -1,68 +1,99 @@
-# iSearch - Fast Google Search CLI & MCP Server
+# iSearch - High-Performance Google Search CLI & MCP
 
-A fast, anti-bot Google Search scraper using Playwright. It leverages persistent browser profiles and aggressive resource blocking to provide quick search results in Markdown format.
+A blazing fast, anti-bot Google Search scraper using Playwright. It utilizes a **Daemon/Client architecture** to keep a browser instance warm, utilizing persistent profiles and aggressive C++ level resource blocking for instant results.
 
 ## Features
 
-- **Fast & Efficient**: Uses a single persistent browser instance with resource blocking (CSS, images, fonts, etc.) to minimize load times.
-- **Anti-Bot Detection**: Uses persistent profiles and stealth scripts to avoid detection.
-- **Markdown Output**: Converts search results directly into clean Markdown using Cheerio and Turndown.
-- **MCP Server**: Compatible with the Model Context Protocol (MCP), allowing AI agents to use it as a tool.
-- **Local Daemon**: Runs as a background service with a Unix socket for fast communication.
+- **Daemon Architecture**: Background process keeps a tab ready. Zero startup latency for subsequent searches.
+- **Aggressive Optimization**: Uses CDP (Chrome DevTools Protocol) to block images, fonts, and ads at the browser engine level.
+- **Race-Condition Free**: Supports rapid-fire queries via Tab Pooling.
+- **Stealth**: Persistent profile with randomized fingerprints to evade bot detection.
+- **MCP Support**: Works seamlessly with Claude Desktop, Cursor, and other AI agents.
 
 ## Installation
 
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/quantavil/isearch.git
-    cd isearch
-    ```
+### 1. Clone & Install
+```bash
+git clone [https://github.com/quantavil/isearch.git](https://github.com/quantavil/isearch.git)
+cd isearch
+npm install
 
-2.  **Install dependencies**:
-    ```bash
-    npm install
-    ```
+```
 
-3.  **Setup Google Profile**:
-    Run the setup script once to create a persistent browser profile. This might require you to solve a CAPTCHA if prompted.
-    ```bash
-    npm run setup
-    ```
+### 2. Setup Profile (Important)
+
+Run this once to log in to Google. This saves your cookies so you don't hit CAPTCHAs later.
+
+```bash
+npm run setup
+
+```
+
+*A browser will open. Log in to Google, then close the window manually.*
+
+### 3. Link Command (Fedora/Linux)
+
+Make the `ask` command available globally:
+
+```bash
+chmod +x ask.js daemon.js mcp-server.js
+ln -sf "$(pwd)/ask.js" ~/.local/bin/ask
+
+```
 
 ## Usage
 
 ### CLI
-You can search directly from the command line:
+
+Search directly from your terminal. The daemon will auto-start if needed.
+
 ```bash
-./ask.js "How to bake a chocolate cake"
+ask "best fedora kde themes 2025"
+
 ```
 
-### Daemon
-Start the daemon in the background:
-```bash
-node daemon.js
-```
+**Commands:**
 
-### MCP Server
-(Coming soon/Implemented) 
-To use this as an MCP server, add it to your `mcp_config.json`:
+* `ask "query"` : Search Google.
+* `ask --status` : Check if the background daemon is running.
+* `ask --stop` : Kill the background daemon.
+
+### MCP Server (AI Agent Integration)
+
+Add this tool to your `mcp_config.json` (for Claude/Cursor/etc).
+
+**Configuration:**
+
 ```json
 {
   "mcpServers": {
     "isearch": {
       "command": "node",
-      "args": ["/path/to/isearch/mcp-server.js"]
+      "args": ["/absolute/path/to/isearch/mcp-server.js"]
     }
   }
 }
+
 ```
 
-## Configuration
+*Note: The MCP server communicates with the same background daemon as the CLI. If you search in CLI, your AI agent gets the benefit of the warmed-up cache.*
 
-- `IDLE_TIMEOUT`: Closes the browser after a period of inactivity.
-- `CACHE_TTL`: Caches results for a specified duration.
-- `DEBUG`: Set to `1` to see browser output and logs.
+## Troubleshooting
+
+**"Profile Locked" or Singleton Error:**
+If the browser crashes, a lock file might remain.
+
+1. Run `ask --stop`
+2. If that fails, run `pkill -f chrome`
+
+**"CAPTCHA Detected":**
+Google has flagged your IP.
+
+1. Run `npm run setup`
+2. Solve the CAPTCHA manually in the window.
+3. Close the window and retry.
 
 ## License
 
 MIT
+

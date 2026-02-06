@@ -8,133 +8,145 @@ const { spawn } = require('child_process');
 const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
 const DAEMON_PATH = path.join(__dirname, 'daemon.js');
 
+// ANSI Colors
 const c = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
   dim: '\x1b[2m',
-  cyan: '\x1b[36m',
-  yellow: '\x1b[33m',
+  red: '\x1b[31m',
   green: '\x1b[32m',
-  white: '\x1b[97m',
-  bgBlue: '\x1b[44m'
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m'
 };
 
-function sendQuery(query) {
-  return new Promise((resolve, reject) => {
-    const client = net.createConnection(SOCKET_PATH);
-    let data = '';
-
-    client.on('connect', () => client.write(JSON.stringify({ query }) + '\n'));
-    client.on('data', chunk => data += chunk.toString());
-    client.on('end', () => {
-      try { resolve(JSON.parse(data)); } 
-      catch { reject(new Error('Invalid response')); }
-    });
-    client.on('error', reject);
-  });
-}
+// ═══════════════════════════════════════════════════════════════
+// DAEMON MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
 
 function startDaemon() {
   return new Promise((resolve, reject) => {
     const daemon = spawn('node', [DAEMON_PATH], {
       detached: true,
-      stdio: 'ignore',
-      env: { ...process.env }
+      stdio: 'ignore', 
+      env: { ...process.env } // Pass current env (useful for DEBUG=1)
     });
+    
     daemon.unref();
 
-    let attempts = 0;
+    // Poll for socket creation
+    const start = Date.now();
     const check = () => {
+      if (Date.now() - start > 5000) return reject(new Error('Daemon failed to start (Timeout)'));
+      
       const client = net.createConnection(SOCKET_PATH);
-      client.on('connect', () => { client.end(); resolve(); });
-      client.on('error', () => {
-        if (++attempts >= 50) reject(new Error('Daemon failed to start'));
-        else setTimeout(check, 100);
+      client.on('connect', () => {
+        client.end();
+        resolve();
       });
+      client.on('error', () => setTimeout(check, 100));
     };
-    setTimeout(check, 200);
+    check();
   });
 }
 
-async function query(q) {
-  try {
-    return await sendQuery(q);
-  } catch (err) {
-    if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
-      process.stdout.write(`${c.dim}Starting daemon...${c.reset}\r`);
-      await startDaemon();
-      return await sendQuery(q);
-    }
-    throw err;
-  }
+function sendRequest(payload) {
+  return new Promise((resolve, reject) => {
+    const client = net.createConnection(SOCKET_PATH);
+    let responseData = '';
+
+    client.on('connect', () => {
+      client.write(JSON.stringify(payload) + '\n');
+    });
+
+    client.on('data', chunk => responseData += chunk);
+
+    client.on('end', () => {
+      try {
+        resolve(JSON.parse(responseData));
+      } catch {
+        reject(new Error('Invalid response from daemon'));
+      }
+    });
+
+    client.on('error', reject);
+  });
 }
 
-function print(result, queryText, elapsed) {
-  const cacheTag = result.fromCache ? `${c.green}[cached]${c.reset} ` : '';
-  console.log(`\n${c.bgBlue}${c.white}${c.bold} 🔍 ${queryText} ${c.reset} ${cacheTag}${c.dim}(${elapsed}ms)${c.reset}\n`);
-
-  if (result.markdown) {
-    console.log(result.markdown);
-    console.log('');
-  } else if (result.error) {
-    console.log(`${c.yellow}❌ ${result.error}${c.reset}\n`);
-  } else {
-    console.log(`${c.yellow}No AI Overview found.${c.reset}\n`);
-  }
-}
+// ═══════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════
 
 async function main() {
   const args = process.argv.slice(2);
 
-  if (!args.length || args[0] === '-h' || args[0] === '--help') {
+  // --- HELP ---
+  if (!args.length || args.includes('-h') || args.includes('--help')) {
     console.log(`
-${c.cyan}${c.bold}Google Search CLI${c.reset}
-
-${c.bold}Usage:${c.reset}  ask <query>
-        ask --stop        Stop daemon
-        ask --status      Show daemon status
-
-${c.bold}Setup:${c.reset}  npm run setup
+${c.bold}Usage:${c.reset}
+  ask "your query"    ${c.dim}# Search Google${c.reset}
+  ask --status        ${c.dim}# Check daemon health${c.reset}
+  ask --stop          ${c.dim}# Stop the background process${c.reset}
 `);
     process.exit(0);
   }
 
-  if (args[0] === '--stop') {
+  // --- STOP ---
+  if (args.includes('--stop')) {
     try {
-      await sendQuery('__STOP__');
-      console.log(`${c.dim}Daemon stopped${c.reset}`);
+      await sendRequest({ query: '__STOP__' });
+      console.log(`${c.green}Daemon stopped.${c.reset}`);
     } catch {
-      console.log(`${c.dim}Daemon not running${c.reset}`);
+      console.log(`${c.dim}Daemon was not running.${c.reset}`);
     }
     process.exit(0);
   }
 
-  if (args[0] === '--status') {
-    try {
-      const status = await sendQuery('__STATUS__');
-      console.log(`
-${c.cyan}Daemon Status${c.reset}
-  Browser ready: ${status.browserReady ? c.green + 'Yes' : c.yellow + 'No'}${c.reset}
-  Cache size:    ${status.cacheSize} queries
-  Uptime:        ${Math.round(status.uptime)}s
-`);
-    } catch {
-      console.log(`${c.dim}Daemon not running${c.reset}`);
-    }
-    process.exit(0);
-  }
-
-  const queryText = args.join(' ');
-  const start = Date.now();
+  // --- QUERY ---
+  const query = args.includes('--status') ? '__STATUS__' : args.join(' ');
 
   try {
-    process.stdout.write(`${c.dim}Searching...${c.reset}`);
-    const result = await query(queryText);
-    process.stdout.write('\r\x1b[K');
-    print(result, queryText, Date.now() - start);
+    // 1. Try sending directly
+    let result;
+    try {
+      result = await sendRequest({ query });
+    } catch (e) {
+      // 2. If failed, start daemon and retry
+      if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
+        if (query !== '__STATUS__') {
+            process.stdout.write(`${c.dim}Starting engine...${c.reset}\r`);
+            await startDaemon();
+            process.stdout.write('                  \r'); // clear line
+            result = await sendRequest({ query });
+        } else {
+            console.log(`${c.yellow}Daemon is not running.${c.reset}`);
+            process.exit(0);
+        }
+      } else {
+        throw e;
+      }
+    }
+
+    // 3. Render Result
+    if (query === '__STATUS__') {
+      console.log(`${c.bold}Daemon Status:${c.reset}`);
+      console.log(`  Status:  ${c.green}${result.status}${c.reset}`);
+      console.log(`  Uptime:  ${Math.floor(result.uptime)}s`);
+      console.log(`  Cache:   ${result.cacheSize} items`);
+      console.log(`  Browser: ${result.browser}`);
+    } 
+    else if (result.error) {
+      console.error(`${c.red}Error:${c.reset} ${result.error}`);
+      process.exit(1);
+    } 
+    else {
+      // Print Markdown
+      console.log(`\n${c.bold}${c.cyan}Q: ${query}${c.reset}`);
+      if (result.fromCache) console.log(`${c.dim}(cached)${c.reset}`);
+      console.log('\n' + result.markdown + '\n');
+    }
+
   } catch (err) {
-    process.stdout.write('\r\x1b[K');
-    console.error(`\n${c.yellow}❌ ${err.message}${c.reset}\n`);
+    console.error(`\n${c.red}Fatal Error:${c.reset} ${err.message}`);
     process.exit(1);
   }
 }

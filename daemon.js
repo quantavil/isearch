@@ -10,44 +10,21 @@ const fs = require('fs');
 const os = require('os');
 
 // ═══════════════════════════════════════════════════════════════
-// CONFIG
+// CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
 
-const IDLE_TIMEOUT = 180_000;        // Close browser after 180s idle
-const CACHE_TTL = 300_000;           // Cache results for 5 minutes
+const IDLE_TIMEOUT = 300_000;         // Auto-shutdown after 5 minutes
 const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
 const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
 const DEBUG = process.env.DEBUG === '1';
 
-// CAPTCHA Settings
-const CAPTCHA_MAX_CONSECUTIVE = 3;   // Restart browser after 3 CAPTCHAs
-const CAPTCHA_COOLDOWN_MS = 30_000;  // 30s cooldown after restart
-const CAPTCHA_WAIT_TIMEOUT = 120_000; // 2 minutes to solve CAPTCHA
-
-// Completion Detection Timeouts (optimized for speed)
-const SVG_DETECTION_TIMEOUT = 10_000;   // 10s for SVG thumbs-up
-const ARIA_DETECTION_TIMEOUT = 6_000;   // 6s for aria-label
-const TEXT_DETECTION_TIMEOUT = 8_000;   // 8s for text polling
-const OVERALL_TIMEOUT = 25_000;         // 25s overall timeout
-
-// CAPTCHA Detection Indicators
-const CAPTCHA_INDICATORS = [
-  'unusual traffic',
-  'are you a robot',
-  'captcha',
-  'verify you\'re human',
-  'recaptcha'
-];
-
-const STEALTH = `
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-  window.chrome = { runtime: {}, app: {} };
-  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-`;
+// Timeouts
+const NAV_TIMEOUT = 15000;            // 15s to load Google
+const AI_WAIT_TIMEOUT = 10000;        // 10s max wait for AI generation
+const OVERALL_TIMEOUT = 30000;        // 30s hard limit per query
 
 // ═══════════════════════════════════════════════════════════════
-// TURNDOWN
+// TURNDOWN (HTML -> Markdown)
 // ═══════════════════════════════════════════════════════════════
 
 const turndown = new TurndownService({
@@ -58,425 +35,298 @@ const turndown = new TurndownService({
 });
 
 turndown.use(turndownPluginGfm.gfm);
-turndown.addRule('stripLinks', { filter: 'a', replacement: c => c });
-turndown.addRule('removeImages', { filter: 'img', replacement: () => '' });
-turndown.addRule('removeButtons', { filter: 'button', replacement: () => '' });
+turndown.addRule('stripLinks', { filter: 'a', replacement: content => content });
+turndown.addRule('removeMedia', { filter: ['img', 'svg', 'canvas', 'video', 'audio'], replacement: () => '' });
+turndown.addRule('removeInteractive', { filter: ['button', 'input', 'form', 'nav', 'footer', 'header'], replacement: () => '' });
 
 // ═══════════════════════════════════════════════════════════════
-// CACHE
+// STATE
 // ═══════════════════════════════════════════════════════════════
 
+let browserContext = null;
+let idleTimer = null;
+let server = null;
 const cache = new Map();
 
-function getCached(query) {
-  const key = query.toLowerCase().trim();
-  const cached = cache.get(key);
-  if (cached && Date.now() - cached.time < CACHE_TTL) {
-    log(`Cache hit: ${key}`);
-    return cached.markdown;
-  }
-  return null;
+function log(msg) {
+  if (DEBUG) console.log(`[${new Date().toISOString().split('T')[1]}] ${msg}`);
 }
-
-function setCache(query, markdown) {
-  const key = query.toLowerCase().trim();
-  cache.set(key, { markdown, time: Date.now() });
-  if (cache.size > 100) {
-    cache.delete(cache.keys().next().value);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// BROWSER POOL
-// ═══════════════════════════════════════════════════════════════
-
-let context = null;
-let page = null;
-let pageReady = false;
-let idleTimer = null;
-let currentHeadless = true;
-let consecutiveCaptchas = 0;
 
 function resetIdleTimer() {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(shutdown, IDLE_TIMEOUT);
 }
 
-async function initBrowser(headless = null) {
-  const shouldBeHeadless = headless !== null ? headless : !DEBUG;
+// ═══════════════════════════════════════════════════════════════
+// BROWSER MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
 
-  // Recreate browser if headless mode changed
-  if (context && currentHeadless !== shouldBeHeadless) {
-    log(`Switching: ${currentHeadless ? 'headless' : 'visible'} → ${shouldBeHeadless ? 'headless' : 'visible'}`);
-    await closeBrowser();
-  }
-
-  if (context && page && pageReady) return page;
+async function initContext() {
+  if (browserContext) return browserContext;
 
   if (!fs.existsSync(PROFILE_PATH)) {
     throw new Error('Profile not found. Run: npm run setup');
   }
 
-  if (context) {
-    await context.close().catch(() => { });
-  }
+  log('Launching persistent context...');
 
-  currentHeadless = shouldBeHeadless;
-
-  const options = {
-    headless: shouldBeHeadless,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-dev-shm-usage',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-sync',
-      '--disable-translate',
-      '--no-first-run',
-      '--disable-popup-blocking',
-      '--disable-infobars',
-      '--disable-notifications',
-      '--lang=en-US',
-      '--window-size=1280,800'
-    ],
-    ignoreDefaultArgs: ['--enable-automation'],
-    viewport: { width: 1280, height: 800 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    locale: 'en-US'
-  };
+  const args = [
+    '--disable-blink-features=AutomationControlled',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-gpu',
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-translate',
+    '--no-first-run',
+    '--disable-notifications',
+    '--disable-background-networking',
+    '--lang=en-US'
+  ];
 
   try {
-    context = await chromium.launchPersistentContext(PROFILE_PATH, { ...options, channel: 'chrome' });
-  } catch {
-    context = await chromium.launchPersistentContext(PROFILE_PATH, options);
+    browserContext = await chromium.launchPersistentContext(PROFILE_PATH, {
+      headless: !DEBUG, 
+      args,
+      viewport: { width: 1280, height: 800 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    });
+  } catch (e) {
+    console.error(`Browser launch failed: ${e.message}`);
+    // Retry once if locked
+    if (e.message.includes('SingletonLock')) {
+      throw new Error('Profile is locked. Close Chrome or kill other daemon instances.');
+    }
+    throw e;
   }
 
-  log(`Browser started (${shouldBeHeadless ? 'headless' : 'visible'})`);
+  return browserContext;
+}
 
-  page = context.pages()[0] || await context.newPage();
-  await page.addInitScript(STEALTH);
+async function getNewPage() {
+  const ctx = await initContext();
+  const page = await ctx.newPage();
 
-  // Resource blocking for speed
-  await page.route('**/*', route => {
-    const type = route.request().resourceType();
-    const url = route.request().url();
-
-    if (type === 'document') return route.continue();
-    if (type === 'script' && (url.includes('google.com/xjs') || url.includes('google.com/js') || url.includes('gstatic.com'))) {
-      return route.continue();
-    }
-    if ((type === 'xhr' || type === 'fetch') && url.includes('google.com')) {
-      return route.continue();
-    }
-    return route.abort();
+  // 1. Stealth Scripts
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    window.chrome = { runtime: {} };
   });
 
-  // Pre-warm: load Google homepage only
-  await page.goto('https://www.google.com/?udm=50', {
-    waitUntil: 'domcontentloaded',
-    timeout: 10000
-  }).catch(() => { });
+  // 2. CDP High-Performance Blocking
+  // This blocks requests at the C++ layer (much faster than page.route)
+  try {
+    const client = await ctx.newCDPSession(page);
+    await client.send('Network.setBlockedURLs', {
+      urls: [
+        '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.ico', '*.svg',
+        '*.woff', '*.woff2', '*.ttf', 
+        '*.mp4', '*.webm', '*.mp3',
+        '*doubleclick*', '*google-analytics*', '*googlesyndication*',
+        '*facebook*', '*twitter*', '*linkedin*'
+      ]
+    });
+    await client.send('Network.enable');
+  } catch (e) {
+    log(`CDP Setup warning: ${e.message}`);
+  }
 
-  pageReady = true;
-  log('Page ready');
   return page;
 }
 
-async function closeBrowser() {
-  pageReady = false;
-  page = null;
-  if (context) {
-    await context.close().catch(() => { });
-    context = null;
-    log('Browser closed');
-  }
-}
-
-async function restartBrowser(reason) {
-  log(`Restarting browser: ${reason}`);
-  await closeBrowser();
-  log(`Cooldown: ${CAPTCHA_COOLDOWN_MS / 1000}s...`);
-  await sleep(CAPTCHA_COOLDOWN_MS);
-  consecutiveCaptchas = 0;
-  await initBrowser(true);
-}
-
 // ═══════════════════════════════════════════════════════════════
-// PARALLEL COMPLETION DETECTION (Promise.race)
-// ═══════════════════════════════════════════════════════════════
-
-// SVG selectors for feedback buttons (Helpful, Not helpful, Share - all use viewBox 3 3 18 18)
-const SVG_SELECTORS = [
-  'button svg[viewBox="3 3 18 18"]',              // Generic: any button with this viewBox
-  'button span svg[viewBox="3 3 18 18"]',         // Share button pattern
-  '[aria-label="Helpful"] svg',                   // Helpful button SVG
-  '[aria-label="Not helpful"] svg',               // Not helpful button SVG
-  '[aria-label=" Share"] svg',                    // Share button SVG (with leading space)
-  '[aria-label="Share"] svg'                      // Share button SVG (without space)
-].join(', ');
-
-// Aria-label selectors (multi-language: helpful, not helpful, share)
-const ARIA_SELECTORS = [
-  // English (note: Share has leading space in actual HTML)
-  '[aria-label="Helpful"]', '[aria-label="Not helpful"]', '[aria-label=" Share"]', '[aria-label="Share"]',
-  // German
-  '[aria-label="Hilfreich"]', '[aria-label="Nicht hilfreich"]', '[aria-label="Teilen"]',
-  // French
-  '[aria-label="Utile"]', '[aria-label="Pas utile"]', '[aria-label="Partager"]',
-  // Spanish
-  '[aria-label="Útil"]', '[aria-label="No es útil"]', '[aria-label="Compartir"]'
-].join(', ');
-
-async function waitForAiCompletion(pg) {
-  const startTime = Date.now();
-  log('Waiting for AI completion...');
-
-  // Method 1: SVG icons (most reliable, language-independent)
-  const svgPromise = pg.waitForSelector(SVG_SELECTORS, {
-    timeout: OVERALL_TIMEOUT,
-    state: 'visible'
-  }).then(() => ({ method: 'svg', elapsed: Date.now() - startTime }));
-
-  // Method 2: aria-label buttons (multi-language)
-  const ariaPromise = pg.waitForSelector(ARIA_SELECTORS, {
-    timeout: OVERALL_TIMEOUT,
-    state: 'visible'
-  }).then(() => ({ method: 'aria', elapsed: Date.now() - startTime }));
-
-  // Method 3: Timeout fallback
-  const timeoutPromise = sleep(OVERALL_TIMEOUT).then(() => ({ method: 'timeout', elapsed: OVERALL_TIMEOUT }));
-
-  // Race - first to resolve wins
-  try {
-    const winner = await Promise.race([
-      svgPromise.catch(() => new Promise(() => { })),
-      ariaPromise.catch(() => new Promise(() => { })),
-      timeoutPromise
-    ]);
-    log(`✓ ${winner.method} detected (${winner.elapsed}ms)`);
-    return winner;
-  } catch {
-    return { method: 'timeout', elapsed: Date.now() - startTime };
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// CAPTCHA HANDLING
-// ═══════════════════════════════════════════════════════════════
-
-function detectCaptcha(html) {
-  const lower = html.toLowerCase();
-  return CAPTCHA_INDICATORS.some(ind => lower.includes(ind));
-}
-
-async function handleCaptcha(query) {
-  consecutiveCaptchas++;
-  log(`CAPTCHA detected! (${consecutiveCaptchas}/${CAPTCHA_MAX_CONSECUTIVE})`);
-
-  if (consecutiveCaptchas >= CAPTCHA_MAX_CONSECUTIVE) {
-    await restartBrowser('max CAPTCHAs');
-    return { success: false, error: 'Too many CAPTCHAs - browser restarted. Please retry.', captchaRequired: true };
-  }
-
-  // Switch to visible mode
-  await closeBrowser();
-  const pg = await initBrowser(false);
-
-  try {
-    await pg.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 15000
-    });
-  } catch (err) {
-    return { success: false, error: `Navigation failed: ${err.message}`, captchaRequired: true };
-  }
-
-  log(`Waiting for CAPTCHA solution (${CAPTCHA_WAIT_TIMEOUT / 1000}s timeout)...`);
-  const captchaDeadline = Date.now() + CAPTCHA_WAIT_TIMEOUT;
-
-  while (Date.now() < captchaDeadline) {
-    await sleep(2000);
-
-    try {
-      const html = await pg.content();
-      if (!detectCaptcha(html)) {
-        log('CAPTCHA solved!');
-        await waitForAiCompletion(pg);
-
-        const finalHtml = await pg.content();
-        const markdown = parseToMarkdown(finalHtml);
-        consecutiveCaptchas = 0;
-
-        // Switch back to headless
-        await closeBrowser();
-        await initBrowser(true);
-
-        return { success: true, markdown, fromCache: false };
-      }
-    } catch { }
-
-    log('Waiting for CAPTCHA...');
-  }
-
-  return { success: false, error: 'CAPTCHA timeout', captchaRequired: true };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// SEARCH
+// SEARCH LOGIC
 // ═══════════════════════════════════════════════════════════════
 
 async function search(query) {
-  const t0 = Date.now();
-
-  const cached = getCached(query);
-  if (cached) return { markdown: cached, fromCache: true };
-
-  const pg = await initBrowser();
-  log(`Browser ready: ${Date.now() - t0}ms`);
-
-  const t1 = Date.now();
-  await pg.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 10000
-  });
-  log(`Navigation: ${Date.now() - t1}ms`);
-
-  // Quick CAPTCHA check
-  const html = await pg.content();
-  if (detectCaptcha(html)) {
-    return handleCaptcha(query);
+  const cacheKey = query.toLowerCase().trim();
+  
+  // 1. Check Cache
+  if (cache.has(cacheKey)) {
+    log(`Cache hit: "${query}"`);
+    return { markdown: cache.get(cacheKey), fromCache: true };
   }
 
-  // Wait for AI completion
-  const t2 = Date.now();
-  const completion = await waitForAiCompletion(pg);
-  log(`Wait (${completion.method}): ${Date.now() - t2}ms`);
-
-  // Get final content
-  const finalHtml = await pg.content();
-  if (DEBUG) fs.writeFileSync('debug.html', finalHtml);
-
-  // Double-check CAPTCHA
-  if (detectCaptcha(finalHtml)) {
-    return handleCaptcha(query);
-  }
-
-  const markdown = parseToMarkdown(finalHtml);
-  consecutiveCaptchas = 0;
-
-  if (markdown) setCache(query, markdown);
-
-  log(`Total: ${Date.now() - t0}ms`);
-  return { markdown, fromCache: false };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// PARSE
-// ═══════════════════════════════════════════════════════════════
-
-function parseToMarkdown(html) {
-  const $ = cheerio.load(html);
-  const $container = $('[data-container-id="main-col"]').first();
-  if (!$container.length) return null;
-
-  const $clone = $container.clone();
-
-  $clone.find([
-    'script', 'style', 'noscript', 'svg', 'button', 'input', 'textarea',
-    '[role="button"]', '[role="navigation"]',
-    '.notranslate', '.txxDge', '.uJ19be', '.rBl3me',
-    '[aria-label="Helpful"]', '[aria-label="Not helpful"]',
-    '[aria-label="Hilfreich"]', '[aria-label="Nicht hilfreich"]',
-    '.DBd2Wb', '.ya9Iof', '.v4bSkd', '[data-crb-el]', '.Fsg96', '.Jd31eb',
-    '[aria-hidden="true"]', '[style*="display:none"]',
-    '.NuOswe', '.LoBHAe', '.J945jc', '.AGtNEf', '.VKalRc', '.xXnAhe',
-    '[data-ved]'
-  ].join(', ')).remove();
-
-  $clone.find('a').removeAttr('href');
-
-  const cleanHtml = $clone.html();
-  if (!cleanHtml) return null;
-
-  return turndown.turndown(cleanHtml)
-    .replace(/https?:\/\/[^\s)>\]]+/g, '')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
-    .replace(/Thinking\s*/gi, '')
-    .replace(/Generating\s*/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim() || null;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// UTILITIES & SERVER
-// ═══════════════════════════════════════════════════════════════
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const log = msg => DEBUG && console.log(`[${Date.now() % 100000}] ${msg}`);
-
-module.exports = { search, initBrowser, closeBrowser, shutdown, handleQuery };
-
-async function handleQuery(queryText) {
-  resetIdleTimer();
-
-  if (queryText === '__STOP__') { shutdown(); return { stopped: true }; }
-  if (queryText === '__STATUS__') {
-    return { browserReady: pageReady, browserMode: currentHeadless ? 'headless' : 'visible', consecutiveCaptchas, cacheSize: cache.size, uptime: process.uptime() };
-  }
+  let page = null;
 
   try {
-    return await search(queryText);
+    const tStart = Date.now();
+    page = await getNewPage();
+
+    // 2. Navigate (Fast)
+    // We use 'domcontentloaded' because we don't need all external assets
+    await page.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT
+    });
+
+    // 3. CAPTCHA Check
+    const isCaptcha = await page.$('form[action*="Captcha"], #captcha-form');
+    if (isCaptcha) {
+      throw new Error("CAPTCHA detected. Please run 'npm run setup' manually to clear it.");
+    }
+
+    // 4. Wait for AI Result (Heuristic)
+    // We look for the main container. If AI is generating, we wait for specific indicators.
+    try {
+      // Main container
+      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 5000 });
+      
+      // Wait for AI completion indicator (The "Share" or "Feedback" icons appear when done)
+      // This SVG viewbox is common for the feedback buttons
+      await page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT });
+    } catch (e) {
+      log('AI Wait Timeout or Not Found (Standard results might be used)');
+    }
+
+    // 5. Extract & Parse
+    const html = await page.content();
+    const markdown = parseHtml(html);
+
+    if (!markdown) {
+        throw new Error("Failed to parse content (Structure might have changed).");
+    }
+
+    // 6. Update Cache
+    cache.set(cacheKey, markdown);
+    if (cache.size > 50) cache.delete(cache.keys().next().value); // LRU-ish
+
+    log(`Query "${query}" finished in ${Date.now() - tStart}ms`);
+    return { markdown, fromCache: false };
+
   } catch (err) {
-    pageReady = false;
+    log(`Error: ${err.message}`);
     return { error: err.message };
+  } finally {
+    if (page) await page.close().catch(() => {});
   }
+}
+
+function parseHtml(html) {
+  const $ = cheerio.load(html);
+  const $container = $('[data-container-id="main-col"]').first();
+  
+  if (!$container.length) return null;
+
+  // Cleanup DOM to reduce Turndown work
+  $container.find('script, style, noscript, iframe').remove();
+  $container.find('div[data-ved], span[data-ved]').remove(); // Remove tracking data attributes
+  $container.find('[aria-label="Helpful"], [aria-label="More"], [aria-label*="Share"]').remove();
+  $container.find('h1, h2, h3').each((i, el) => {
+      // Sometimes Google puts random text in headings
+      if ($(el).text().trim() === 'Generative AI is experimental.') $(el).remove();
+  });
+
+  const cleanHtml = $container.html();
+  if (!cleanHtml) return null;
+
+  let md = turndown.turndown(cleanHtml);
+
+  // Post-processing Markdown
+  md = md
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // Remove links, keep text
+    .replace(/\n{3,}/g, '\n\n')               // Collapse excessive newlines
+    .replace(/Thinking\.\.\./g, '')           // Remove loading text
+    .replace(/Generating\.\.\./g, '')
+    .trim();
+
+  return md;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SERVER
+// ═══════════════════════════════════════════════════════════════
+
+async function handleRequest(data) {
+  resetIdleTimer();
+
+  if (data.query === '__STOP__') {
+    shutdown();
+    return { stopped: true };
+  }
+  
+  if (data.query === '__STATUS__') {
+    return { 
+      status: 'running', 
+      uptime: process.uptime(), 
+      cacheSize: cache.size,
+      browser: !!browserContext ? 'connected' : 'waiting'
+    };
+  }
+
+  return await search(data.query);
 }
 
 function startServer() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch { }
+  // 1. Clean up old socket
+  try {
+    if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
+  } catch (e) {
+    console.error(`Socket cleanup warning: ${e.message}`);
+  }
 
-  const srv = net.createServer(socket => {
+  // 2. Start Server
+  server = net.createServer(socket => {
     let buffer = '';
+    
     socket.on('data', async chunk => {
-      buffer += chunk.toString();
+      buffer += chunk;
+      
+      // Handle potential fragmented packets (simple newline delimiter)
       if (buffer.includes('\n')) {
-        const line = buffer.split('\n')[0];
-        buffer = '';
+        const parts = buffer.split('\n');
+        const message = parts[0];
+        
         try {
-          const { query } = JSON.parse(line);
-          log(`Query: ${query}`);
-          socket.end(JSON.stringify(await handleQuery(query)));
-        } catch (err) {
-          socket.end(JSON.stringify({ error: err.message }));
+          const json = JSON.parse(message);
+          const response = await handleRequest(json);
+          socket.write(JSON.stringify(response));
+        } catch (e) {
+          socket.write(JSON.stringify({ error: "Invalid JSON or Internal Error" }));
+        } finally {
+          socket.end();
         }
+        buffer = parts.slice(1).join('\n');
       }
     });
-    socket.on('error', () => { });
   });
 
-  srv.listen(SOCKET_PATH, () => {
-    log(`Listening on ${SOCKET_PATH}`);
+  server.listen(SOCKET_PATH, () => {
+    log(`Daemon listening on ${SOCKET_PATH}`);
     resetIdleTimer();
-    initBrowser().catch(err => log(`Pre-warm failed: ${err.message}`));
+    
+    // Pre-warm the browser immediately
+    initContext().catch(e => {
+        if(DEBUG) console.error("Warmup failed:", e.message);
+    });
   });
-  srv.on('error', err => { console.error('Server error:', err); process.exit(1); });
-  return srv;
-}
 
-let server = null;
+  server.on('error', (e) => {
+    console.error(`Server error: ${e.message}`);
+    process.exit(1);
+  });
+}
 
 async function shutdown() {
   log('Shutting down...');
-  if (idleTimer) clearTimeout(idleTimer);
-  await closeBrowser();
-  if (server) { server.close(); try { fs.unlinkSync(SOCKET_PATH); } catch { } }
+  if (browserContext) {
+    await browserContext.close().catch(() => {});
+    browserContext = null;
+  }
+  if (server) server.close();
+  try { fs.unlinkSync(SOCKET_PATH); } catch (e) {}
   process.exit(0);
 }
 
+// Handle signals
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  shutdown();
+});
 
-if (require.main === module) { server = startServer(); }
+// Start
+startServer();
