@@ -3,80 +3,11 @@
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
-const net = require('net');
 const path = require('path');
-const os = require('os');
-const { spawn } = require('child_process');
+const { search } = require(path.join(__dirname, 'lib', 'client'));
 
 // ═══════════════════════════════════════════════════════════════
-// CONFIG
-// ═══════════════════════════════════════════════════════════════
-
-const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
-const DAEMON_PATH = path.join(__dirname, 'daemon.js');
-
-// ═══════════════════════════════════════════════════════════════
-// DAEMON CLIENT LOGIC
-// ═══════════════════════════════════════════════════════════════
-
-function startDaemon() {
-  return new Promise((resolve, reject) => {
-    const daemon = spawn('node', [DAEMON_PATH], {
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env }
-    });
-    daemon.unref();
-
-    const start = Date.now();
-    const check = () => {
-      if (Date.now() - start > 5000) return reject(new Error('Daemon failed to start'));
-      const client = net.createConnection(SOCKET_PATH);
-      client.on('connect', () => { client.end(); resolve(); });
-      client.on('error', () => setTimeout(check, 100));
-    };
-    check();
-  });
-}
-
-function queryDaemon(query) {
-  return new Promise((resolve, reject) => {
-    const client = net.createConnection(SOCKET_PATH);
-    let buffer = '';
-
-    client.on('connect', () => {
-      client.write(JSON.stringify({ query }) + '\n');
-    });
-
-    client.on('data', chunk => buffer += chunk);
-
-    client.on('end', () => {
-      try {
-        resolve(JSON.parse(buffer));
-      } catch {
-        reject(new Error('Invalid JSON from daemon'));
-      }
-    });
-
-    client.on('error', reject);
-  });
-}
-
-async function handleSearch(query) {
-  try {
-    return await queryDaemon(query);
-  } catch (err) {
-    if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
-      // Daemon dead? Auto-start it.
-      await startDaemon();
-      return await queryDaemon(query);
-    }
-    throw err;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// MCP SERVER SETUP
+// MCP SERVER
 // ═══════════════════════════════════════════════════════════════
 
 const server = new Server(
@@ -84,39 +15,67 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [{
-      name: "google_search",
-      description: "Search Google to find real-time information, documentation, or fact-check data.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "The search query (e.g., 'latest fedora release date')" }
-        },
-        required: ["query"]
-      }
-    }]
-  };
-});
+// List available tools
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [{
+    name: "google_search",
+    description: "Search Google for real-time information. Returns AI-generated summaries when available, otherwise standard search results. Use for current events, documentation, fact-checking, or any information that may have changed since training.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { 
+          type: "string", 
+          description: "The search query (e.g., 'latest node.js version', 'how to use react hooks')" 
+        }
+      },
+      required: ["query"]
+    }
+  }]
+}));
 
+// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name !== "google_search") {
-    throw new Error(`Unknown tool: ${request.params.name}`);
+  const { name, arguments: args } = request.params;
+
+  if (name !== "google_search") {
+    return {
+      content: [{ type: "text", text: `Unknown tool: ${name}` }],
+      isError: true
+    };
   }
 
-  const query = request.params.arguments.query;
-  if (!query) throw new Error("Query is required");
+  const query = args?.query;
+  if (!query || typeof query !== 'string') {
+    return {
+      content: [{ type: "text", text: "Error: 'query' parameter is required and must be a string" }],
+      isError: true
+    };
+  }
 
   try {
-    const result = await handleSearch(query);
+    const result = await search(query);
 
     if (result.error) {
-      return { content: [{ type: "text", text: `Search Error: ${result.error}` }], isError: true };
+      return {
+        content: [{ type: "text", text: `Search Error: ${result.error}` }],
+        isError: true
+      };
+    }
+
+    // Format response with metadata
+    let response = result.markdown || "No results found.";
+    
+    // Add metadata footer
+    const metaParts = [];
+    if (result.timeMs !== undefined) metaParts.push(`${result.timeMs}ms`);
+    if (result.fromCache) metaParts.push('cached');
+    
+    if (metaParts.length > 0) {
+      response += `\n\n---\n_Fetched in ${metaParts.join(', ')}_`;
     }
 
     return {
-      content: [{ type: "text", text: result.markdown || "No results found." }],
+      content: [{ type: "text", text: response }],
       isError: false
     };
 
@@ -128,12 +87,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-main().catch((error) => {
-  console.error("Server error:", error);
+main().catch(err => {
+  console.error("MCP Server Error:", err);
   process.exit(1);
 });

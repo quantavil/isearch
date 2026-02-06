@@ -1,29 +1,35 @@
 {
-    "name": "ask-google",
-    "version": "1.0.0",
-    "description": "Fast Google Search CLI with anti-bot detection using persistent browser profiles",
-    "main": "index.js",
-    "bin": {
-        "ask": "./ask.js"
-    },
-    "scripts": {
-        "setup": "node setup.js",
-        "start": "node index.js",
-        "mcp": "node mcp-server.js"
-    },
-    "keywords": [
-        "google",
-        "search",
-        "cli",
-        "scraper"
-    ],
-    "author": "",
-    "license": "MIT",
-    "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.26.0",
-        "cheerio": "latest",
-        "playwright": "latest",
-        "turndown": "^7.2.2",
-        "turndown-plugin-gfm": "^1.0.2"
-    }
+  "name": "isearch",
+  "version": "2.0.0",
+  "description": "Lightning-fast Google Search CLI with daemon architecture and MCP support",
+  "bin": {
+    "ask": "./ask.js"
+  },
+  "scripts": {
+    "setup": "node setup.js",
+    "start": "node daemon.js",
+    "mcp": "node mcp-server.js",
+    "test": "node test-daemon.js",
+    "test:mcp": "node test-mcp.js"
+  },
+  "keywords": [
+    "google",
+    "search",
+    "cli",
+    "mcp",
+    "ai",
+    "scraper"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "cheerio": "latest",
+    "playwright": "latest",
+    "turndown": "^7.2.2",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
 }
