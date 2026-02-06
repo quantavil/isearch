@@ -13,27 +13,17 @@ const os = require('os');
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
 
-const IDLE_TIMEOUT = 300_000;         // 5 min auto-shutdown
+const IDLE_TIMEOUT = 300_000;
 const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
 const PROFILE_PATH = path.join(os.homedir(), '.google-search-cli', 'profile');
 const DEBUG = process.env.DEBUG === '1';
 
-const NAV_TIMEOUT = 12000;
-const AI_WAIT_TIMEOUT = 8000;
-const POOL_SIZE = 2;
+const NAV_TIMEOUT = 15000;
+const AI_WAIT_TIMEOUT = 10000;
 const CACHE_MAX = 50;
 
-// CDP Blocked URLs (applied per page)
-const BLOCKED_URLS = [
-  '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.ico', '*.svg',
-  '*.woff', '*.woff2', '*.ttf', '*.otf',
-  '*.mp4', '*.webm', '*.mp3', '*.wav',
-  '*doubleclick*', '*google-analytics*', '*googlesyndication*',
-  '*googleadservices*', '*facebook*', '*twitter*', '*linkedin*'
-];
-
 // ═══════════════════════════════════════════════════════════════
-// TURNDOWN (HTML → Markdown)
+// TURNDOWN
 // ═══════════════════════════════════════════════════════════════
 
 const turndown = new TurndownService({
@@ -44,17 +34,13 @@ const turndown = new TurndownService({
 });
 
 turndown.use(turndownPluginGfm.gfm);
-
-// Single rule to strip links (keeps text)
-turndown.addRule('stripLinks', { 
-  filter: 'a', 
-  replacement: content => content 
+turndown.addRule('stripLinks', { filter: 'a', replacement: c => c });
+turndown.addRule('removeMedia', { 
+  filter: ['img', 'svg', 'canvas', 'video', 'audio'], 
+  replacement: () => '' 
 });
-
-// Remove all non-text elements
-turndown.addRule('removeNonText', { 
-  filter: ['img', 'svg', 'canvas', 'video', 'audio', 'button', 'input', 
-           'form', 'nav', 'footer', 'header', 'iframe', 'script', 'style'],
+turndown.addRule('removeInteractive', { 
+  filter: ['button', 'input', 'form', 'nav', 'footer', 'header'], 
   replacement: () => '' 
 });
 
@@ -65,29 +51,20 @@ turndown.addRule('removeNonText', {
 let browserContext = null;
 let idleTimer = null;
 let server = null;
-let isShuttingDown = false;
 const cache = new Map();
-const pagePool = [];
-let warmingPool = false;
 const startTime = Date.now();
 
 function log(msg) {
-  if (DEBUG) {
-    const ts = new Date().toISOString().slice(11, 23);
-    console.log(`[${ts}] ${msg}`);
-  }
+  if (DEBUG) console.log(`[${new Date().toISOString().slice(11, 23)}] ${msg}`);
 }
 
 function resetIdleTimer() {
   if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    log('Idle timeout reached');
-    shutdown();
-  }, IDLE_TIMEOUT);
+  idleTimer = setTimeout(shutdown, IDLE_TIMEOUT);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BROWSER MANAGEMENT
+// BROWSER
 // ═══════════════════════════════════════════════════════════════
 
 async function initContext() {
@@ -97,9 +74,9 @@ async function initContext() {
     throw new Error('Profile not found. Run: npm run setup');
   }
 
-  log('Launching persistent browser context...');
+  log('Launching browser...');
 
-  const launchArgs = [
+  const args = [
     '--disable-blink-features=AutomationControlled',
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -112,7 +89,6 @@ async function initContext() {
     '--disable-translate',
     '--disable-background-networking',
     '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding',
     '--no-first-run',
     '--disable-notifications',
     '--lang=en-US'
@@ -121,250 +97,149 @@ async function initContext() {
   try {
     browserContext = await chromium.launchPersistentContext(PROFILE_PATH, {
       headless: !DEBUG,
-      args: launchArgs,
+      args,
       viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      bypassCSP: true,
-      ignoreHTTPSErrors: true
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     });
-
-    log('Browser context launched successfully');
-    
-    // Start warming the pool immediately
-    warmPool();
-    
-    return browserContext;
-
+    log('Browser launched');
   } catch (e) {
     if (e.message.includes('SingletonLock')) {
-      throw new Error('Profile is locked. Run: ask --stop, or: pkill -f chromium');
+      throw new Error('Profile locked. Run: ask --stop or pkill -f chromium');
     }
     throw e;
   }
+
+  return browserContext;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// PAGE POOL (Real Tab Pooling with CDP per-page)
-// ═══════════════════════════════════════════════════════════════
-
-async function createOptimizedPage() {
+async function getPage() {
   const ctx = await initContext();
   const page = await ctx.newPage();
 
-  // 1. Stealth scripts
+  // Stealth
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
     window.chrome = { runtime: {} };
   });
 
-  // 2. CDP-level blocking (per page, but done once at creation)
+  // CDP blocking
   try {
     const client = await ctx.newCDPSession(page);
-    await client.send('Network.setBlockedURLs', { urls: BLOCKED_URLS });
+    await client.send('Network.setBlockedURLs', {
+      urls: [
+        '*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.ico', '*.svg',
+        '*.woff', '*.woff2', '*.ttf', '*.otf',
+        '*.mp4', '*.webm', '*.mp3',
+        '*doubleclick*', '*google-analytics*', '*googlesyndication*',
+        '*googleadservices*', '*facebook*', '*twitter*', '*linkedin*'
+      ]
+    });
     await client.send('Network.enable');
-    
-    // Store CDP client reference for potential future use
-    page._cdpClient = client;
   } catch (e) {
-    log(`CDP setup warning: ${e.message}`);
+    log(`CDP warning: ${e.message}`);
   }
 
   return page;
 }
 
-async function warmPool() {
-  if (warmingPool || isShuttingDown) return;
-  warmingPool = true;
-
-  try {
-    while (pagePool.length < POOL_SIZE && !isShuttingDown) {
-      const page = await createOptimizedPage();
-      if (!isShuttingDown) {
-        pagePool.push(page);
-        log(`Pool warmed: ${pagePool.length}/${POOL_SIZE} pages`);
-      } else {
-        await page.close().catch(() => {});
-      }
-    }
-  } catch (e) {
-    log(`Pool warmup error: ${e.message}`);
-  } finally {
-    warmingPool = false;
-  }
-}
-
-async function acquirePage() {
-  await initContext();
-
-  // Try to get from pool
-  if (pagePool.length > 0) {
-    const page = pagePool.shift();
-    
-    // Verify page is still usable
-    try {
-      if (!page.isClosed()) {
-        // Trigger async replenish
-        setImmediate(() => warmPool());
-        return page;
-      }
-    } catch {
-      // Page invalid, fall through to create new
-    }
-  }
-
-  // Pool empty or page invalid - create new
-  log('Pool empty, creating new page');
-  return await createOptimizedPage();
-}
-
-function releasePage(page) {
-  if (!page || isShuttingDown) return;
-
-  try {
-    if (page.isClosed()) return;
-
-    if (pagePool.length < POOL_SIZE) {
-      // Return to pool - no navigation needed, just reuse
-      pagePool.push(page);
-      log(`Page returned to pool: ${pagePool.length}/${POOL_SIZE}`);
-    } else {
-      // Pool full, close this page
-      page.close().catch(() => {});
-    }
-  } catch {
-    // Page in bad state, try to close
-    page.close().catch(() => {});
-  }
-}
-
 // ═══════════════════════════════════════════════════════════════
-// SEARCH LOGIC
+// SEARCH
 // ═══════════════════════════════════════════════════════════════
 
 async function search(query) {
   const cacheKey = query.toLowerCase().trim();
-  const searchStart = Date.now();
+  const t0 = Date.now();
 
-  // 1. Check cache first
+  // Cache check
   if (cache.has(cacheKey)) {
     log(`Cache hit: "${query}"`);
     const cached = cache.get(cacheKey);
-    // Move to end (LRU refresh)
+    // LRU refresh
     cache.delete(cacheKey);
     cache.set(cacheKey, cached);
-    return { 
-      markdown: cached, 
-      fromCache: true, 
-      timeMs: Date.now() - searchStart 
-    };
+    return { markdown: cached, fromCache: true, timeMs: Date.now() - t0 };
   }
 
   let page = null;
 
   try {
-    page = await acquirePage();
-    const navStart = Date.now();
+    page = await getPage();
 
-    // 2. Navigate
-    const url = `https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`;
-    await page.goto(url, {
+    // Navigate
+    await page.goto(`https://www.google.com/search?udm=50&q=${encodeURIComponent(query)}`, {
       waitUntil: 'domcontentloaded',
       timeout: NAV_TIMEOUT
     });
 
-    log(`Navigation: ${Date.now() - navStart}ms`);
-
-    // 3. CAPTCHA check
-    const hasCaptcha = await page.$('form[action*="Captcha"], #captcha-form, #recaptcha');
-    if (hasCaptcha) {
-      throw new Error("CAPTCHA detected. Run 'npm run setup' to solve manually.");
+    // CAPTCHA check
+    if (await page.$('form[action*="Captcha"], #captcha-form, #recaptcha')) {
+      throw new Error("CAPTCHA detected. Run 'npm run setup' to solve.");
     }
 
-    // 4. Wait for AI result
-    const waitStart = Date.now();
+    // Wait for AI (fast heuristic)
     try {
-      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 4000 });
-      
-      // Wait for completion indicators
-      await Promise.race([
-        page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT }),
-        page.waitForFunction(() => {
-          const el = document.querySelector('[data-container-id="main-col"]');
-          return el && el.textContent && el.textContent.length > 300;
-        }, { timeout: AI_WAIT_TIMEOUT }),
-        new Promise(r => setTimeout(r, AI_WAIT_TIMEOUT))
-      ]);
+      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 5000 });
+      await page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT });
     } catch {
-      log(`AI wait: ${Date.now() - waitStart}ms (timeout/not found)`);
+      log('AI wait timeout (using available content)');
     }
 
-    // 5. Extract and parse
+    // Parse
     const html = await page.content();
     const markdown = parseHtml(html);
 
-    if (!markdown || markdown.length < 20) {
-      throw new Error('Failed to parse content. Page structure may have changed.');
+    if (!markdown) {
+      throw new Error('Failed to parse content.');
     }
 
-    // 6. Update cache (LRU eviction)
+    // Cache (LRU)
     cache.set(cacheKey, markdown);
     while (cache.size > CACHE_MAX) {
-      const firstKey = cache.keys().next().value;
-      cache.delete(firstKey);
+      cache.delete(cache.keys().next().value);
     }
 
-    const timeMs = Date.now() - searchStart;
-    log(`Search complete: "${query}" in ${timeMs}ms`);
+    const timeMs = Date.now() - t0;
+    log(`"${query}" done in ${timeMs}ms`);
 
     return { markdown, fromCache: false, timeMs };
 
   } catch (err) {
-    log(`Search error: ${err.message}`);
-    return { 
-      error: err.message, 
-      timeMs: Date.now() - searchStart 
-    };
+    log(`Error: ${err.message}`);
+    return { error: err.message, timeMs: Date.now() - t0 };
   } finally {
-    releasePage(page);
+    if (page) await page.close().catch(() => {});
   }
 }
 
 function parseHtml(html) {
   const $ = cheerio.load(html);
-  const $container = $('[data-container-id="main-col"]').first();
+  const $c = $('[data-container-id="main-col"]').first();
 
-  if (!$container.length) {
-    return null;
-  }
+  if (!$c.length) return null;
 
-  // Remove unwanted elements
-  $container.find([
-    'script', 'style', 'noscript', 'iframe',
-    '[data-ved]', '[aria-label="Helpful"]', '[aria-label="Not helpful"]',
-    '[aria-label*="Share"]', '[aria-label="More"]',
-    'g-loading-icon', '.loading'
-  ].join(',')).remove();
-
-  // Remove "Generative AI is experimental" disclaimer
-  $container.find('*').each((_, el) => {
-    const text = $(el).text().trim();
-    if (text === 'Generative AI is experimental.' || 
-        text.startsWith('Thinking') || 
-        text.startsWith('Generating')) {
+  // Cleanup
+  $c.find('script, style, noscript, iframe').remove();
+  $c.find('[data-ved]').remove();
+  $c.find('[aria-label="Helpful"], [aria-label="Not helpful"], [aria-label*="Share"], [aria-label="More"]').remove();
+  $c.find('h1, h2, h3').each((_, el) => {
+    const txt = $(el).text().trim();
+    if (txt === 'Generative AI is experimental.' || txt === 'About this result') {
       $(el).remove();
     }
   });
 
-  const cleanHtml = $container.html();
+  const cleanHtml = $c.html();
   if (!cleanHtml) return null;
 
   let md = turndown.turndown(cleanHtml);
 
-  // Minimal post-processing (most done by Turndown rules)
+  // Minimal cleanup
   md = md
-    .replace(/\n{3,}/g, '\n\n')    // Collapse 3+ newlines to 2
-    .replace(/^\s+|\s+$/g, '');     // Trim
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')  // Strip link syntax
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/Thinking\.\.\./g, '')
+    .replace(/Generating\.\.\./g, '')
+    .trim();
 
   return md;
 }
@@ -377,30 +252,26 @@ async function handleRequest(data) {
   resetIdleTimer();
 
   if (!data || typeof data.query !== 'string') {
-    return { error: 'Invalid request: missing query' };
+    return { error: 'Invalid request' };
   }
 
-  const query = data.query;
+  const q = data.query;
 
-  // Control commands
-  if (query === '__STOP__') {
-    setImmediate(() => shutdown());
+  if (q === '__STOP__') {
+    setImmediate(shutdown);
     return { stopped: true };
   }
 
-  if (query === '__STATUS__') {
+  if (q === '__STATUS__') {
     return {
       status: 'running',
       uptime: Math.floor((Date.now() - startTime) / 1000),
       cacheSize: cache.size,
-      poolSize: pagePool.length,
-      poolMax: POOL_SIZE,
       browser: browserContext ? 'connected' : 'initializing'
     };
   }
 
-  // Regular search
-  return await search(query);
+  return await search(q);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -408,109 +279,55 @@ async function handleRequest(data) {
 // ═══════════════════════════════════════════════════════════════
 
 function startServer() {
-  // Clean up stale socket
-  try {
-    fs.unlinkSync(SOCKET_PATH);
-  } catch (e) {
-    if (e.code !== 'ENOENT') {
-      log(`Socket cleanup warning: ${e.message}`);
-    }
-  }
+  try { fs.unlinkSync(SOCKET_PATH); } catch {}
 
   server = net.createServer(socket => {
     let buffer = '';
 
     socket.on('data', async chunk => {
-      buffer += chunk.toString();
+      buffer += chunk;
+      const idx = buffer.indexOf('\n');
+      if (idx === -1) return;
 
-      const newlineIdx = buffer.indexOf('\n');
-      if (newlineIdx === -1) return;
-
-      const message = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
+      const msg = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 1);
 
       try {
-        const request = JSON.parse(message);
-        const response = await handleRequest(request);
-        socket.write(JSON.stringify(response));
-      } catch (e) {
-        socket.write(JSON.stringify({ error: `Server error: ${e.message}` }));
-      } finally {
-        socket.end();
+        const req = JSON.parse(msg);
+        const res = await handleRequest(req);
+        socket.write(JSON.stringify(res));
+      } catch {
+        socket.write(JSON.stringify({ error: 'Internal error' }));
       }
+      socket.end();
     });
 
-    socket.on('error', err => {
-      log(`Socket error: ${err.message}`);
-    });
-  });
-
-  server.on('error', err => {
-    console.error(`Server failed to start: ${err.message}`);
-    process.exit(1);
+    socket.on('error', () => {});
   });
 
   server.listen(SOCKET_PATH, () => {
-    log(`Daemon listening on ${SOCKET_PATH}`);
+    log(`Listening on ${SOCKET_PATH}`);
     resetIdleTimer();
+    initContext().catch(e => log(`Warmup: ${e.message}`));
+  });
 
-    // Pre-warm browser context
-    initContext().catch(e => {
-      log(`Browser init error: ${e.message}`);
-    });
+  server.on('error', e => {
+    console.error(`Server error: ${e.message}`);
+    process.exit(1);
   });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SHUTDOWN
-// ═══════════════════════════════════════════════════════════════
-
 async function shutdown() {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
   log('Shutting down...');
-
-  // Clear timer
   if (idleTimer) clearTimeout(idleTimer);
-
-  // Close pooled pages
-  for (const page of pagePool) {
-    await page.close().catch(() => {});
-  }
-  pagePool.length = 0;
-
-  // Close browser
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-  }
-
-  // Close server
-  if (server) {
-    server.close();
-  }
-
-  // Remove socket file
-  try {
-    fs.unlinkSync(SOCKET_PATH);
-  } catch {}
-
-  log('Shutdown complete');
+  if (browserContext) await browserContext.close().catch(() => {});
+  if (server) server.close();
+  try { fs.unlinkSync(SOCKET_PATH); } catch {}
   process.exit(0);
 }
 
-// Signal handlers
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
-process.on('uncaughtException', err => {
-  console.error('Uncaught exception:', err);
-  shutdown();
-});
-process.on('unhandledRejection', err => {
-  console.error('Unhandled rejection:', err);
-  shutdown();
-});
+process.on('uncaughtException', e => { console.error('Fatal:', e); shutdown(); });
 
-// Start the server
 startServer();

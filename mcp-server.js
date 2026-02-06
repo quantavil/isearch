@@ -6,97 +6,57 @@ const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontext
 const path = require('path');
 const { search } = require(path.join(__dirname, 'lib', 'client'));
 
-// ═══════════════════════════════════════════════════════════════
-// MCP SERVER
-// ═══════════════════════════════════════════════════════════════
-
 const server = new Server(
   { name: "isearch", version: "2.0.0" },
   { capabilities: { tools: {} } }
 );
 
-// List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [{
     name: "google_search",
-    description: "Search Google for real-time information. Returns AI-generated summaries when available, otherwise standard search results. Use for current events, documentation, fact-checking, or any information that may have changed since training.",
+    description: "Search Google for real-time information, documentation, or current events.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { 
-          type: "string", 
-          description: "The search query (e.g., 'latest node.js version', 'how to use react hooks')" 
-        }
+        query: { type: "string", description: "The search query" }
       },
       required: ["query"]
     }
   }]
 }));
 
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  if (name !== "google_search") {
-    return {
-      content: [{ type: "text", text: `Unknown tool: ${name}` }],
-      isError: true
-    };
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  if (req.params.name !== "google_search") {
+    return { content: [{ type: "text", text: `Unknown tool: ${req.params.name}` }], isError: true };
   }
 
-  const query = args?.query;
-  if (!query || typeof query !== 'string') {
-    return {
-      content: [{ type: "text", text: "Error: 'query' parameter is required and must be a string" }],
-      isError: true
-    };
+  const q = req.params.arguments?.query;
+  if (!q) {
+    return { content: [{ type: "text", text: "Query is required" }], isError: true };
   }
 
   try {
-    const result = await search(query);
-
-    if (result.error) {
-      return {
-        content: [{ type: "text", text: `Search Error: ${result.error}` }],
-        isError: true
-      };
+    const r = await search(q);
+    
+    if (r.error) {
+      return { content: [{ type: "text", text: `Error: ${r.error}` }], isError: true };
     }
 
-    // Format response with metadata
-    let response = result.markdown || "No results found.";
-    
-    // Add metadata footer
-    const metaParts = [];
-    if (result.timeMs !== undefined) metaParts.push(`${result.timeMs}ms`);
-    if (result.fromCache) metaParts.push('cached');
-    
-    if (metaParts.length > 0) {
-      response += `\n\n---\n_Fetched in ${metaParts.join(', ')}_`;
+    let text = r.markdown || 'No results found.';
+    if (r.timeMs != null) {
+      text += `\n\n---\n_${r.timeMs}ms${r.fromCache ? ' (cached)' : ''}_`;
     }
 
-    return {
-      content: [{ type: "text", text: response }],
-      isError: false
-    };
-
-  } catch (err) {
-    return {
-      content: [{ type: "text", text: `System Error: ${err.message}` }],
-      isError: true
-    };
+    return { content: [{ type: "text", text }], isError: false };
+  } catch (e) {
+    return { content: [{ type: "text", text: `System error: ${e.message}` }], isError: true };
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// MAIN
-// ═══════════════════════════════════════════════════════════════
-
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-main().catch(err => {
-  console.error("MCP Server Error:", err);
+new StdioServerTransport().then(t => server.connect(t)).catch(() => {
+  const t = new StdioServerTransport();
+  server.connect(t);
+}).catch(e => {
+  console.error('MCP error:', e);
   process.exit(1);
 });
