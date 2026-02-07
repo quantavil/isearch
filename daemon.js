@@ -37,9 +37,11 @@ let server = null;
 const cache = new Map();
 const startTime = Date.now();
 
-// Concurrency control
+// Concurrency & Pooling
 let activeTabs = 0;
 const waitQueue = [];
+const pagePool = [];
+const MAX_POOL_SIZE = MAX_CONCURRENT;
 
 function log(msg) {
   if (DEBUG) console.log(`[${new Date().toISOString().slice(11, 23)}] ${msg}`);
@@ -131,6 +133,11 @@ async function initContext() {
 }
 
 async function getPage() {
+  if (pagePool.length > 0) {
+    log(`Reusing page from pool (size: ${pagePool.length})`);
+    return pagePool.pop();
+  }
+
   const ctx = await initContext();
   const page = await ctx.newPage();
 
@@ -226,8 +233,15 @@ async function search(query) {
     log(`Error: ${err.message}`);
     return { error: err.message, timeMs: Date.now() - t0 };
   } finally {
+    if (page) {
+      if (pagePool.length < MAX_POOL_SIZE) {
+        log('Returning page to pool');
+        pagePool.push(page);
+      } else {
+        await page.close().catch(() => { });
+      }
+    }
     releaseSlot();
-    if (page) await page.close().catch(() => {});
   }
 }
 
@@ -267,7 +281,7 @@ async function handleRequest(data) {
 // ═══════════════════════════════════════════════════════════════
 
 function startServer() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
 
   server = net.createServer(socket => {
     let buffer = '';
@@ -293,7 +307,7 @@ function startServer() {
       socket.end();
     });
 
-    socket.on('error', () => {});
+    socket.on('error', () => { });
   });
 
   server.listen(SOCKET_PATH, () => {
@@ -311,9 +325,9 @@ function startServer() {
 async function shutdown() {
   log('Shutting down...');
   if (idleTimer) clearTimeout(idleTimer);
-  if (browserContext) await browserContext.close().catch(() => {});
+  if (browserContext) await browserContext.close().catch(() => { });
   if (server) server.close();
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
   process.exit(0);
 }
 
@@ -321,9 +335,9 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('uncaughtException', async e => {
   console.error('Fatal:', e);
-  try { if (browserContext) await browserContext.close().catch(() => {}); } catch {}
-  try { if (server) server.close(); } catch {}
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
+  try { if (browserContext) await browserContext.close().catch(() => { }); } catch { }
+  try { if (server) server.close(); } catch { }
+  try { fs.unlinkSync(SOCKET_PATH); } catch { }
   process.exit(1);
 });
 
