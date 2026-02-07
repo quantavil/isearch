@@ -14,9 +14,15 @@ const c = {
   red: '\x1b[31m',
   green: '\x1b[32m',
   yellow: '\x1b[33m',
+  magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   gray: '\x1b[90m'
 };
+
+const md = s => s
+  .replace(/\*\*(.+?)\*\*/g, `${c.bold}${c.magenta}$1${c.reset}`)  // **bold** → pink
+  .replace(/\*(.+?)\*/g, `${c.green}$1${c.reset}`)                  // *italic* → green
+  .replace(/^(#{1,3})\s+(.+)/gm, `${c.bold}${c.cyan}$2${c.reset}`); // # headers
 
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│', lc: '├', rc: '┤' };
 
@@ -75,7 +81,7 @@ function renderBox(title, content, meta = {}) {
   out.push(`${c.cyan}${B.lc}${B.h.repeat(w)}${B.rc}${c.reset}`);
 
   // Content
-  for (const line of wrap(content || 'No results found.', inner)) {
+  for (const line of wrap(md(content) || 'No results found.', inner)) {
     out.push(`${c.cyan}${B.v}${c.reset} ${padLine(line, inner)} ${c.cyan}${B.v}${c.reset}`);
   }
 
