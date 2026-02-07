@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 const path = require('path');
-const { search, status, stop, startDaemon, SOCKET_PATH } = require(path.join(__dirname, 'lib', 'client'));
+const { search, status, stop, startDaemon } = require(path.join(__dirname, 'lib', 'client'));
+const { SOCKET_PATH } = require(path.join(__dirname, 'lib', 'constants'));
 
 // Colors
 const c = {
@@ -52,7 +53,8 @@ async function runTests() {
     const result = await status();
     if (result.status !== 'running') throw new Error('Expected status "running"');
     if (typeof result.uptime !== 'number') throw new Error('Expected numeric uptime');
-    if (typeof result.poolSize !== 'number') throw new Error('Expected numeric poolSize');
+    if (typeof result.cacheSize !== 'number') throw new Error('Expected numeric cacheSize');
+    if (typeof result.headless !== 'boolean') throw new Error('Expected boolean headless');
   });
 
   // Test 3: Simple search
@@ -81,18 +83,18 @@ async function runTests() {
     console.log(`  ${c.dim}Content length: ${result.markdown.length} chars${c.reset}`);
   });
 
-  // Test 6: Status after searches (pool should still be warm)
-  await test('Pool still warm after searches', async () => {
+  // Test 6: Cache populated
+  await test('Cache populated after searches', async () => {
     const result = await status();
-    if (result.poolSize < 1) {
-      console.log(`  ${c.yellow}Warning: Pool empty (might be replenishing)${c.reset}`);
+    if (result.cacheSize < 1) {
+      console.log(`  ${c.yellow}Warning: Cache empty${c.reset}`);
     }
   });
 
   // Summary
   console.log(`\n${'─'.repeat(40)}`);
   console.log(`Results: ${c.green}${passed} passed${c.reset}, ${failed > 0 ? c.red : c.dim}${failed} failed${c.reset}`);
-  
+
   if (process.argv.includes('--stop')) {
     console.log(`\n${c.dim}Stopping daemon...${c.reset}`);
     await stop().catch(() => {});

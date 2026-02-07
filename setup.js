@@ -3,22 +3,19 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const { PROFILE_PATH } = require('./lib/constants');
-const { stop } = require('./lib/client');
-
-async function stopDaemon() {
-  try {
-    console.log('⚠️  Stopping running daemon...');
-    await stop();
-  } catch {
-    // Daemon not running, ignore
-  }
-}
-
+const { stopAndWait } = require('./lib/client');
 
 async function setup() {
   console.log('\n🔧 \x1b[1mGoogle Search CLI Setup\x1b[0m\n');
 
-  await stopDaemon();
+  // Stop any running daemon so the profile isn't locked
+  try {
+    console.log('⚠️  Stopping running daemon...');
+    await stopAndWait();
+    console.log('   Daemon stopped.\n');
+  } catch {
+    console.log('   No daemon running.\n');
+  }
 
   fs.mkdirSync(PROFILE_PATH, { recursive: true });
 
@@ -44,7 +41,7 @@ async function setup() {
   } catch (err) {
     console.error('\n❌ Error:', err.message);
     if (err.message.includes('SingletonLock')) {
-      console.error('   Close all Chrome instances first.');
+      console.error('   Close all Chrome instances first, or run: ask --stop');
     }
   }
 }

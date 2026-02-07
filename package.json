@@ -1,6 +1,6 @@
 {
   "name": "isearch",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Lightning-fast Google Search CLI with daemon architecture and MCP support",
   "bin": {
     "ask": "./ask.js"
@@ -9,6 +9,8 @@
     "setup": "node setup.js",
     "daemon": "node daemon.js",
     "mcp": "node mcp-server.js",
+    "test": "node test-daemon.js",
+    "test:mcp": "node test-mcp.js",
     "stop": "node -e \"require('./lib/client').stop().then(() => console.log('Stopped')).catch(() => console.log('Not running'))\""
   },
   "keywords": ["google", "search", "cli", "mcp", "ai"],

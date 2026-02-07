@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const path = require('path');
-const { query, startDaemon } = require(path.join(__dirname, 'lib', 'client'));
+const { query, startDaemon, stopAndWait } = require(path.join(__dirname, 'lib', 'client'));
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS & BOX DRAWING
@@ -85,10 +85,12 @@ function renderBox(title, content, meta = {}) {
 }
 
 function renderStatus(r) {
+  const mode = r.headless ? 'headless' : 'headed';
   return `
 ${c.bold}${c.cyan}◆ iSearch Daemon${c.reset}
 ${c.gray}─────────────────────${c.reset}
   Status:  ${c.green}●${c.reset} ${r.status}
+  Mode:    ${mode}
   Uptime:  ${r.uptime}s
   Cache:   ${r.cacheSize} items
   Browser: ${r.browser}
@@ -100,12 +102,17 @@ function renderHelp() {
 ${c.bold}${c.cyan}iSearch${c.reset} ${c.dim}v2.0${c.reset} - Lightning-fast Google Search
 
 ${c.bold}Usage:${c.reset}
-  ${c.green}ask${c.reset} "your query"     Search Google
-  ${c.green}ask${c.reset} --status         Check daemon status
-  ${c.green}ask${c.reset} --stop           Stop the daemon
+  ${c.green}ask${c.reset} "your query"         Search Google (headless)
+  ${c.green}ask${c.reset} --head "query"        Search with visible browser
+  ${c.green}ask${c.reset} --head               Switch daemon to headed mode
+  ${c.green}ask${c.reset} --headless            Switch daemon to headless mode
+  ${c.green}ask${c.reset} --status             Check daemon status
+  ${c.green}ask${c.reset} --stop               Stop the daemon
 
 ${c.bold}Examples:${c.reset}
   ${c.dim}$${c.reset} ask "what is rust"
+  ${c.dim}$${c.reset} ask --head "debug this captcha"
+  ${c.dim}$${c.reset} ask --headless
   ${c.dim}$${c.reset} ask "latest node.js version"
 `;
 }
@@ -115,10 +122,15 @@ ${c.bold}Examples:${c.reset}
 // ═══════════════════════════════════════════════════════════════
 
 async function main() {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
 
-  // Help
-  if (!args.length || args.includes('-h') || args.includes('--help')) {
+  // Extract mode flags before filtering
+  const wantHeaded = rawArgs.includes('--head');
+  const wantHeadless = rawArgs.includes('--headless');
+  const args = rawArgs.filter(a => !['--head', '--headless'].includes(a));
+
+  // Help — show when no args at all
+  if (!rawArgs.length || args.includes('-h') || args.includes('--help')) {
     console.log(renderHelp());
     process.exit(0);
   }
@@ -154,27 +166,61 @@ async function main() {
     process.exit(0);
   }
 
-  // Search
+  // ─── Search / Mode Switch ─────────────────────────────────
+
+  // null = no preference (default to headless on fresh start)
+  const desiredHeadless = wantHeaded ? false : (wantHeadless ? true : null);
   const q = args.join(' ');
   let startup = 0;
 
   try {
-    let result;
+    // Probe daemon state
+    let daemonRunning = false;
+    let needRestart = false;
 
     try {
-      result = await query({ query: q });
-    } catch (e) {
-      if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
-        process.stdout.write(`${c.dim}Starting engine...${c.reset}`);
-        const t0 = Date.now();
-        await startDaemon();
-        startup = Date.now() - t0;
-        process.stdout.write(`\r${c.green}✔${c.reset} Engine ready ${c.dim}(${fmt(startup)})${c.reset}    \n`);
-        result = await query({ query: q });
-      } else {
-        throw e;
+      const st = await query({ query: '__STATUS__' }, 2000);
+      daemonRunning = true;
+      // Restart only if an explicit mode flag was given and it differs
+      if (desiredHeadless !== null && st.headless !== desiredHeadless) {
+        needRestart = true;
       }
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e.code !== 'ECONNREFUSED') throw e;
     }
+
+    // Handle mode switch (stop → restart)
+    if (needRestart) {
+      const mode = desiredHeadless ? 'headless' : 'headed';
+      process.stdout.write(`${c.dim}Restarting in ${mode} mode...${c.reset}`);
+      await stopAndWait();
+      const t0 = Date.now();
+      await startDaemon({ headless: desiredHeadless });
+      startup = Date.now() - t0;
+      process.stdout.write(`\r${c.green}✔${c.reset} Engine ready (${mode}) ${c.dim}(${fmt(startup)})${c.reset}    \n`);
+
+    } else if (!daemonRunning) {
+      // Fresh start — use explicit flag or default to headless
+      const headless = desiredHeadless !== null ? desiredHeadless : true;
+      const mode = headless ? 'headless' : 'headed';
+      process.stdout.write(`${c.dim}Starting engine...${c.reset}`);
+      const t0 = Date.now();
+      await startDaemon({ headless });
+      startup = Date.now() - t0;
+      process.stdout.write(`\r${c.green}✔${c.reset} Engine ready (${mode}) ${c.dim}(${fmt(startup)})${c.reset}    \n`);
+    }
+
+    // Mode-switch-only (no query)
+    if (!q) {
+      if (wantHeaded || wantHeadless) {
+        const mode = wantHeaded ? 'headed' : 'headless';
+        console.log(`${c.green}✔${c.reset} Daemon running in ${c.cyan}${mode}${c.reset} mode.`);
+      }
+      process.exit(0);
+    }
+
+    // Execute search
+    const result = await query({ query: q });
 
     if (result.error) {
       console.error(`\n${c.red}✖ Error:${c.reset} ${result.error}`);
