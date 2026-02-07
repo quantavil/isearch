@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 const path = require('path');
-const { search, status, stop, startDaemon } = require(path.join(__dirname, 'lib', 'client'));
-const { SOCKET_PATH } = require(path.join(__dirname, 'lib', 'constants'));
+const { search, status, stop, startDaemon } = require(path.join(__dirname, '..', 'lib', 'client'));
+const { SOCKET_PATH } = require(path.join(__dirname, '..', 'lib', 'constants'));
 
 // Colors
 const c = {
@@ -97,7 +97,7 @@ async function runTests() {
 
   if (process.argv.includes('--stop')) {
     console.log(`\n${c.dim}Stopping daemon...${c.reset}`);
-    await stop().catch(() => {});
+    await stop().catch(() => { });
     console.log('Daemon stopped.\n');
   } else {
     console.log(`\n${c.dim}Daemon left running. Use --stop to shut down.${c.reset}\n`);

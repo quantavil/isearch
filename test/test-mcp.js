@@ -5,7 +5,7 @@ const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio
 const path = require("path");
 
 async function main() {
-  const serverPath = path.join(__dirname, "mcp-server.js");
+  const serverPath = path.join(__dirname, "..", "mcp-server.js");
 
   const transport = new StdioClientTransport({
     command: "node",

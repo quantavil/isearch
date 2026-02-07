@@ -9,11 +9,17 @@
     "setup": "node setup.js",
     "daemon": "node daemon.js",
     "mcp": "node mcp-server.js",
-    "test": "node test-daemon.js",
-    "test:mcp": "node test-mcp.js",
+    "test": "node test/test-daemon.js",
+    "test:mcp": "node test/test-mcp.js",
     "stop": "node -e \"require('./lib/client').stop().then(() => console.log('Stopped')).catch(() => console.log('Not running'))\""
   },
-  "keywords": ["google", "search", "cli", "mcp", "ai"],
+  "keywords": [
+    "google",
+    "search",
+    "cli",
+    "mcp",
+    "ai"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=18"
