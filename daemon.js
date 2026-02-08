@@ -132,6 +132,8 @@ async function initContext() {
   return browserLaunching;
 }
 
+
+
 async function getPage() {
   if (pagePool.length > 0) {
     log(`Reusing page from pool (size: ${pagePool.length})`);
@@ -210,7 +212,12 @@ async function search(query) {
     }
 
     // Parse
-    const html = await page.content();
+    let html;
+    try {
+      html = await page.$eval('[data-container-id="main-col"]', el => el.outerHTML);
+    } catch {
+      html = await page.content(); // Fallback to full content if specific selector fails
+    }
     const markdown = parseHtml(html);
 
     if (!markdown) {
