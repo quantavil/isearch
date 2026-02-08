@@ -38,6 +38,8 @@ function wrap(text, max) {
   const lines = [];
   for (const p of text.split('\n')) {
     if (!p.trim()) { lines.push(''); continue; }
+    // Never wrap GFM table rows — splitting them destroys table syntax
+    if (p.trimStart().startsWith('|')) { lines.push(p); continue; }
     if (strip(p).length <= max) { lines.push(p); continue; }
     let cur = '';
     for (const w of p.split(' ')) {
