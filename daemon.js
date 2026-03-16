@@ -13,7 +13,10 @@ const {
   AI_WAIT_TIMEOUT,
   CACHE_MAX,
   MAX_CONCURRENT,
-  BLOCKED_URLS
+  CMD_STOP,
+  CMD_STATUS,
+  BLOCKED_RESOURCE_RE,
+  TRACKER_RE
 } = require('./lib/constants');
 
 const DEBUG = process.env.DEBUG === '1';
@@ -120,6 +123,16 @@ async function initContext() {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
       });
       log(`Browser launched (headless: ${IS_HEADLESS})`);
+
+      // Block resources at context level (applies to all pages)
+      await browserContext.route(BLOCKED_RESOURCE_RE, r => r.abort());
+      await browserContext.route(TRACKER_RE, r => r.abort());
+
+      // Stealth at context level
+      await browserContext.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+      });
     } catch (e) {
       browserLaunching = null;
       if (e.message.includes('SingletonLock')) {
@@ -137,30 +150,16 @@ async function initContext() {
 
 
 async function getPage() {
-  if (pagePool.length > 0) {
-    log(`Reusing page from pool (size: ${pagePool.length})`);
-    return pagePool.pop();
+  while (pagePool.length > 0) {
+    const page = pagePool.pop();
+    if (!page.isClosed()) {
+      log(`Reusing page from pool (size: ${pagePool.length})`);
+      return page;
+    }
   }
 
   const ctx = await initContext();
-  const page = await ctx.newPage();
-
-  // Stealth
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    window.chrome = { runtime: {} };
-  });
-
-  // CDP-level resource blocking (faster than route-based)
-  try {
-    const client = await ctx.newCDPSession(page);
-    await client.send('Network.setBlockedURLs', { urls: BLOCKED_URLS });
-    await client.send('Network.enable');
-  } catch (e) {
-    log(`CDP warning: ${e.message}`);
-  }
-
-  return page;
+  return await ctx.newPage();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -267,12 +266,12 @@ async function handleRequest(data) {
 
   const q = data.query;
 
-  if (q === '__STOP__') {
+  if (q === CMD_STOP) {
     setImmediate(shutdown);
     return { stopped: true };
   }
 
-  if (q === '__STATUS__') {
+  if (q === CMD_STATUS) {
     return {
       status: 'running',
       uptime: Math.floor((Date.now() - startTime) / 1000),
@@ -305,6 +304,7 @@ function startServer() {
 
       processing = true;
       const msg = buffer.slice(0, idx);
+      buffer = '';
 
       try {
         const req = JSON.parse(msg);
@@ -322,7 +322,9 @@ function startServer() {
   server.listen(SOCKET_PATH, () => {
     log(`Listening on ${SOCKET_PATH} (headless: ${IS_HEADLESS})`);
     resetIdleTimer();
-    initContext().catch(e => log(`Warmup: ${e.message}`));
+    initContext().then(() => {
+      getPage().then(p => { pagePool.push(p); log('Page pre-warmed'); }).catch(() => {});
+    }).catch(e => log(`Warmup: ${e.message}`));
   });
 
   server.on('error', e => {

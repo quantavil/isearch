@@ -2,6 +2,7 @@
 
 const path = require('path');
 const { query, startDaemon, stopAndWait } = require(path.join(__dirname, 'lib', 'client'));
+const { CMD_STOP, CMD_STATUS } = require(path.join(__dirname, 'lib', 'constants'));
 
 // ═══════════════════════════════════════════════════════════════
 // COLORS & BOX DRAWING
@@ -146,7 +147,7 @@ async function main() {
   // Stop
   if (args.includes('--stop')) {
     try {
-      await query({ query: '__STOP__' }, 3000);
+      await query({ query: CMD_STOP }, 3000);
       console.log(`${c.green}✔${c.reset} Daemon stopped.`);
     } catch (e) {
       if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
@@ -161,7 +162,7 @@ async function main() {
   // Status
   if (args.includes('--status')) {
     try {
-      const r = await query({ query: '__STATUS__' }, 3000);
+      const r = await query({ query: CMD_STATUS }, 3000);
       console.log(renderStatus(r));
     } catch (e) {
       if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
@@ -187,7 +188,7 @@ async function main() {
     let needRestart = false;
 
     try {
-      const st = await query({ query: '__STATUS__' }, 2000);
+      const st = await query({ query: CMD_STATUS }, 2000);
       daemonRunning = true;
       // Restart only if an explicit mode flag was given and it differs
       if (desiredHeadless !== null && st.headless !== desiredHeadless) {

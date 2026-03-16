@@ -1,8 +1,6 @@
 const net = require('net');
-const os = require('os');
 const path = require('path');
-
-const SOCKET_PATH = path.join(os.tmpdir(), 'google-search-cli.sock');
+const { SOCKET_PATH } = require(path.join(__dirname, '..', 'lib', 'constants'));
 
 function sendRequest(query) {
     return new Promise((resolve, reject) => {

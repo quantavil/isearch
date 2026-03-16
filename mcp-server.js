@@ -7,7 +7,7 @@ const path = require('path');
 const { search } = require(path.join(__dirname, 'lib', 'client'));
 
 const server = new Server(
-  { name: "isearch", version: "2.0.0" },
+  { name: "isearch", version: "2.1.0" },
   { capabilities: { tools: {} } }
 );
 
