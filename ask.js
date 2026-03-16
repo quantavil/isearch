@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 const path = require('path');
 const { query, startDaemon, stopAndWait } = require(path.join(__dirname, 'lib', 'client'));
@@ -233,7 +233,7 @@ async function main() {
     if (result.error) {
       console.error(`\n${c.red}✖ Error:${c.reset} ${result.error}`);
       if (result.error.includes('CAPTCHA')) {
-        console.error(`  ${c.dim}Run: npm run setup${c.reset}`);
+        console.error(`  ${c.dim}Run: bun run setup${c.reset}`);
       }
       console.log();
       process.exit(1);

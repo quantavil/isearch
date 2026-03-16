@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 const path = require('path');
 const { search, status, stop, startDaemon } = require(path.join(__dirname, '..', 'lib', 'client'));

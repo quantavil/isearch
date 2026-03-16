@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 const { chromium } = require('playwright');
 const fs = require('fs');
-const { PROFILE_PATH } = require('./lib/constants');
+const { PROFILE_PATH, BROWSER_PATH } = require('./lib/constants');
 const { stopAndWait } = require('./lib/client');
 
 async function setup() {
@@ -26,6 +26,7 @@ async function setup() {
 
   try {
     const context = await chromium.launchPersistentContext(PROFILE_PATH, {
+      executablePath: BROWSER_PATH,
       headless: false,
       args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
       viewport: { width: 1280, height: 800 }

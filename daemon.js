@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 const { chromium } = require('playwright');
 const net = require('net');
@@ -7,6 +7,7 @@ const { parseHtml } = require('./lib/parser');
 const {
   SOCKET_PATH,
   PROFILE_PATH,
+  BROWSER_PATH,
   IDLE_TIMEOUT,
   NAV_TIMEOUT,
   AI_WAIT_TIMEOUT,
@@ -87,7 +88,7 @@ async function initContext() {
 
   browserLaunching = (async () => {
     if (!fs.existsSync(PROFILE_PATH)) {
-      throw new Error('Profile not found. Run: npm run setup');
+      throw new Error('Profile not found. Run: bun run setup');
     }
 
     log('Launching browser...');
@@ -112,6 +113,7 @@ async function initContext() {
 
     try {
       browserContext = await chromium.launchPersistentContext(PROFILE_PATH, {
+        executablePath: BROWSER_PATH,
         headless: IS_HEADLESS,
         args,
         viewport: { width: 1280, height: 800 },
@@ -193,7 +195,7 @@ async function search(query) {
 
     // CAPTCHA check
     if (await page.$('form[action*="Captcha"], #captcha-form, #recaptcha')) {
-      throw new Error("CAPTCHA detected. Run 'npm run setup' to solve.");
+      throw new Error("CAPTCHA detected. Run 'bun run setup' to solve.");
     }
 
     // Wait for AI completion

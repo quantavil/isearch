@@ -18,7 +18,7 @@ A blazing fast, anti-bot Google Search scraper using Playwright. It utilizes a *
 ```bash
 git clone https://github.com/quantavil/isearch.git
 cd isearch
-npm install
+bun install
 ```
 
 ### 2. Setup Profile (Important)
@@ -26,7 +26,7 @@ npm install
 Run this once to log in to Google. This saves your cookies so you don't hit CAPTCHAs later.
 
 ```bash
-npm run setup
+bun run setup
 ```
 
 *A browser will open. Log in to Google, then close the window manually.*
@@ -87,7 +87,7 @@ Add this tool to your `mcp_config.json` (for Claude/Cursor/etc).
 {
   "mcpServers": {
     "isearch": {
-      "command": "node",
+      "command": "bun",
       "args": ["/absolute/path/to/isearch/mcp-server.js"]
     }
   }
@@ -100,13 +100,13 @@ Add this tool to your `mcp_config.json` (for Claude/Cursor/etc).
 
 ```bash
 # Integration tests (starts daemon if needed)
-npm test
+bun run test
 
 # MCP protocol test
-npm run test:mcp
+bun run test:mcp
 
 # Stop daemon after tests
-npm test -- --stop
+bun run test -- --stop
 ```
 
 ## Troubleshooting
@@ -121,7 +121,7 @@ If the browser crashes, a lock file might remain.
 Google has flagged your IP.
 
 1. Run `ask --head "test"` to see what's happening
-2. Or run `npm run setup` and solve the CAPTCHA manually
+2. Or run `bun run setup` and solve the CAPTCHA manually
 3. Close the window and retry
 
 **Daemon won't switch modes:**

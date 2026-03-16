@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio.js");
@@ -8,7 +8,7 @@ async function main() {
   const serverPath = path.join(__dirname, "..", "mcp-server.js");
 
   const transport = new StdioClientTransport({
-    command: "node",
+    command: "bun",
     args: [serverPath],
   });
 
