@@ -31,14 +31,19 @@ bun run setup
 
 *A browser will open. Log in to Google, then close the window manually.*
 
-### 3. Link Command (Fedora/Linux)
+### 3. Use `ask` as a Global Command
 
 Make the `ask` command available globally:
 
 ```bash
+# Ensure scripts are executable (Linux/macOS)
 chmod +x ask.js daemon.js mcp-server.js
-ln -sf "$(pwd)/ask.js" ~/.local/bin/ask
+
+# Link globally via bun
+bun link
 ```
+
+*(Alternatively, you can manually symlink: `ln -sf "$(pwd)/ask.js" ~/.local/bin/ask`)*
 
 ## Usage
 

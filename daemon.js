@@ -128,11 +128,36 @@ async function initContext() {
       await browserContext.route(BLOCKED_RESOURCE_RE, r => r.abort());
       await browserContext.route(TRACKER_RE, r => r.abort());
 
+      // Handle user manually closing the browser context
+      browserContext.on('close', () => {
+        log('Browser context closed');
+        browserContext = null;
+        browserLaunching = null;
+        pagePool.length = 0;
+      });
+
       // Stealth at context level
       await browserContext.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.chrome = { runtime: {} };
       });
+
+      // Close old tabs from previous sessions to ensure a fresh window
+      const pages = browserContext.pages();
+      // Keep only one page. Close the rest.
+      while (pages.length > 1) {
+        const p = pages.pop();
+        await p.close().catch(() => {});
+      }
+
+      // Put the single remaining initial page into the pool so it gets reused
+      for (const p of browserContext.pages()) {
+        if (pagePool.length < MAX_POOL_SIZE) {
+          pagePool.push(p);
+        } else {
+          await p.close().catch(() => {});
+        }
+      }
     } catch (e) {
       browserLaunching = null;
       if (e.message.includes('SingletonLock')) {
@@ -159,6 +184,16 @@ async function getPage() {
   }
 
   const ctx = await initContext();
+
+  // Try to use a pre-existing page from context creation if available
+  if (pagePool.length > 0) {
+    const page = pagePool.pop();
+    if (!page.isClosed()) {
+      log(`Reusing default page from context (pool size: ${pagePool.length})`);
+      return page;
+    }
+  }
+
   return await ctx.newPage();
 }
 
@@ -288,8 +323,10 @@ async function handleRequest(data) {
 // SERVER
 // ═══════════════════════════════════════════════════════════════
 
+const cleanupSocket = () => { try { fs.unlinkSync(SOCKET_PATH); } catch { } };
+
 function startServer() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch { }
+  cleanupSocket();
 
   server = net.createServer(socket => {
     let buffer = '';
@@ -323,7 +360,7 @@ function startServer() {
     log(`Listening on ${SOCKET_PATH} (headless: ${IS_HEADLESS})`);
     resetIdleTimer();
     initContext().then(() => {
-      getPage().then(p => { pagePool.push(p); log('Page pre-warmed'); }).catch(() => {});
+      log('Page pre-warmed');
     }).catch(e => log(`Warmup: ${e.message}`));
   });
 
@@ -338,7 +375,7 @@ async function shutdown() {
   if (idleTimer) clearTimeout(idleTimer);
   if (browserContext) await browserContext.close().catch(() => { });
   if (server) server.close();
-  try { fs.unlinkSync(SOCKET_PATH); } catch { }
+  cleanupSocket();
   process.exit(0);
 }
 
@@ -348,7 +385,7 @@ process.on('uncaughtException', async e => {
   console.error('Fatal:', e);
   try { if (browserContext) await browserContext.close().catch(() => { }); } catch { }
   try { if (server) server.close(); } catch { }
-  try { fs.unlinkSync(SOCKET_PATH); } catch { }
+  cleanupSocket();
   process.exit(1);
 });
 

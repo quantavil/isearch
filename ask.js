@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 const path = require('path');
-const { query, startDaemon, stopAndWait } = require(path.join(__dirname, 'lib', 'client'));
+const { query, startDaemon, stopAndWait, isDaemonDown } = require(path.join(__dirname, 'lib', 'client'));
 const { CMD_STOP, CMD_STATUS } = require(path.join(__dirname, 'lib', 'constants'));
 
 // ═══════════════════════════════════════════════════════════════
@@ -150,7 +150,7 @@ async function main() {
       await query({ query: CMD_STOP }, 3000);
       console.log(`${c.green}✔${c.reset} Daemon stopped.`);
     } catch (e) {
-      if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
+      if (isDaemonDown(e)) {
         console.log(`${c.dim}Daemon was not running.${c.reset}`);
       } else {
         console.error(`${c.red}Error:${c.reset} ${e.message}`);
@@ -165,7 +165,7 @@ async function main() {
       const r = await query({ query: CMD_STATUS }, 3000);
       console.log(renderStatus(r));
     } catch (e) {
-      if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
+      if (isDaemonDown(e)) {
         console.log(`\n${c.yellow}◆${c.reset} Daemon is ${c.yellow}not running${c.reset}`);
         console.log(`  ${c.dim}Start with: ask "your query"${c.reset}\n`);
       } else {
@@ -195,7 +195,7 @@ async function main() {
         needRestart = true;
       }
     } catch (e) {
-      if (e.code !== 'ENOENT' && e.code !== 'ECONNREFUSED') throw e;
+      if (!isDaemonDown(e)) throw e;
     }
 
     // Handle mode switch (stop → restart)
