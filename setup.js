@@ -17,6 +17,10 @@ async function setup() {
     console.log('   No daemon running.\n');
   }
 
+  if (fs.existsSync(PROFILE_PATH)) {
+    console.log('🧹 Clearing previous profile...');
+    fs.rmSync(PROFILE_PATH, { recursive: true, force: true });
+  }
   fs.mkdirSync(PROFILE_PATH, { recursive: true });
 
   console.log('1. A browser window will open.');
