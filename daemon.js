@@ -3,14 +3,12 @@
 const { chromium } = require('playwright');
 const net = require('net');
 const fs = require('fs');
-const { parseHtml } = require('./lib/parser');
 const {
   SOCKET_PATH,
   PROFILE_PATH,
   BROWSER_PATH,
   IDLE_TIMEOUT,
   NAV_TIMEOUT,
-  AI_WAIT_TIMEOUT,
   CACHE_MAX,
   MAX_CONCURRENT,
   CMD_STOP,
@@ -136,10 +134,43 @@ async function initContext() {
         pagePool.length = 0;
       });
 
-      // Stealth at context level
+      // Grant clipboard permissions for Google
+      await browserContext.grantPermissions(
+        ['clipboard-read', 'clipboard-write'],
+        { origin: 'https://www.google.com' }
+      );
+
+      // Stealth + clipboard intercept at context level
       await browserContext.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.chrome = { runtime: {} };
+
+        // Intercept clipboard writes to capture copy button output
+        window.__copiedText = null;
+        if (navigator.clipboard) {
+          const origWriteText = navigator.clipboard.writeText?.bind(navigator.clipboard);
+          const origWrite = navigator.clipboard.write?.bind(navigator.clipboard);
+
+          if (origWriteText) {
+            navigator.clipboard.writeText = async (text) => {
+              window.__copiedText = text;
+              return origWriteText(text).catch(() => {});
+            };
+          }
+          if (origWrite) {
+            navigator.clipboard.write = async (items) => {
+              try {
+                for (const item of items) {
+                  if (item.types.includes('text/plain')) {
+                    const blob = await item.getType('text/plain');
+                    window.__copiedText = await blob.text();
+                  }
+                }
+              } catch {}
+              return origWrite(items).catch(() => {});
+            };
+          }
+        }
       });
 
       // Close old tabs from previous sessions to ensure a fresh window
@@ -232,32 +263,17 @@ async function search(query) {
       throw new Error("CAPTCHA detected. Run 'bun run setup' to solve.");
     }
 
-    // Wait for AI completion
-    try {
-      await page.waitForSelector('[data-container-id="main-col"]', { timeout: 3000 });
+    // Wait for AI generation to complete (copy button appears when done)
+    await page.waitForSelector('button[aria-label="Copy text"]', { timeout: NAV_TIMEOUT });
 
-      await Promise.race([
-        page.waitForSelector('svg[viewBox="3 3 18 18"]', { timeout: AI_WAIT_TIMEOUT }),
-        page.waitForFunction(() => {
-          const el = document.querySelector('[data-container-id="main-col"]');
-          return el && el.textContent.length > 500;
-        }, { timeout: AI_WAIT_TIMEOUT })
-      ]);
-    } catch {
-      log('AI wait timeout (using available content)');
-    }
-
-    // Parse
-    let html;
-    try {
-      html = await page.$eval('[data-container-id="main-col"]', el => el.outerHTML);
-    } catch {
-      html = await page.content(); // Fallback to full content if specific selector fails
-    }
-    const markdown = parseHtml(html);
+    // Reset intercepted text, click copy, read captured text
+    await page.evaluate(() => { window.__copiedText = null; });
+    await page.click('button[aria-label="Copy text"]');
+    await page.waitForFunction(() => window.__copiedText !== null, { timeout: 5000 });
+    const markdown = await page.evaluate(() => window.__copiedText);
 
     if (!markdown) {
-      throw new Error('Failed to parse content.');
+      throw new Error('No content copied from page.');
     }
 
     // Cache (LRU eviction)

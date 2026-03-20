@@ -23,6 +23,11 @@ const c = {
 const md = s => s
   .replace(/\*\*(.+?)\*\*/g, `${c.bold}${c.magenta}$1${c.reset}`)  // **bold** → pink
   .replace(/\*(.+?)\*/g, `${c.green}$1${c.reset}`)                  // *italic* → green
+  .replace(/`(.+?)`/g, `${c.yellow}$1${c.reset}`)                   // `code` → yellow
+  .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {          // [text](url)
+    const norm = u => u.replace(/^https?:\/\/(www\.)?/, '').replace(/[\/.\s]+$/, '');
+    return norm(text) === norm(url) ? `${c.cyan}${url}${c.reset}` : `${text} ${c.dim}(${c.cyan}${url}${c.dim})${c.reset}`;
+  })
   .replace(/^(#{1,3})\s+(.+)/gm, `${c.bold}${c.cyan}$2${c.reset}`); // # headers
 
 const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│', lc: '├', rc: '┤' };
